@@ -80,6 +80,27 @@ class DraftInfo(BaseModel):
     note: str = "Template draft — written by code, not a model. An agent sends it; the system does not."
 
 
+class AgentOutcome(BaseModel):
+    """The agent's final ground truth for a handled ticket.
+
+    Recorded after the fact (``POST /api/runs/{id}/outcome``) by the
+    agent who actually handled the ticket: where it really belonged,
+    whether it resolved, and — where the agent can judge — the truth
+    of the verify/score questions. This is the label set live
+    calibration scores the recorded probabilities against; truths are
+    keyed by question key (the API accepts agent-facing aliases and
+    normalises them before they land here).
+    """
+
+    final_category: str = ""
+    final_queue: str = ""
+    resolved: bool = False
+    recorded_by: str = ""
+    recorded_at: str = ""  # ISO datetime, stamped by the service
+    verify_truth: dict[str, bool] = Field(default_factory=dict)
+    score_truth: dict[str, int] = Field(default_factory=dict)
+
+
 class RunTelemetry(BaseModel):
     backend: str = ""
     model: str = ""
@@ -118,6 +139,7 @@ class TicketResult(BaseModel):
     decision: str = ""  # agent decision once made: approved | rejected
     decision_by: str = ""
     decision_reason: str = ""
+    outcome: Optional[AgentOutcome] = None  # agent's ground truth, once recorded
     external_action_taken: bool = False  # invariant: always False
     trace: list[TraceStep] = Field(default_factory=list)
     telemetry: Optional[RunTelemetry] = None

@@ -87,6 +87,10 @@ class Store(Protocol):
 
     def all_records(self) -> list["TriageRecord"]: ...
 
+    def save_error(self, entry: dict) -> None: ...
+
+    def all_errors(self) -> list[dict]: ...
+
 
 class ObjectStore(Protocol):
     """The document seam: raw ticket payloads live behind object keys,

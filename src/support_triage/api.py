@@ -300,14 +300,126 @@ def assign_ticket(ticket_id: str, body: AssignRequest, request: Request):
     return record.model_dump()
 
 
+_FLAG_PARAMS = (
+    "contains_pii",
+    "is_abusive",
+    "mentions_legal",
+    "is_outage_report",
+    "needs_engineering",
+)
+
+
 @app.get("/queue")
-def queue():
-    return {"tickets": get_service().queue()}
+def queue(
+    queue: str = "",
+    status: str = "",
+    priority_band: str = "",
+    flag: str = "",
+    backend: str = "",
+    q: str = "",
+):
+    if flag and flag not in _FLAG_PARAMS:
+        raise HTTPException(
+            status_code=422,
+            detail=f"flag must be one of {list(_FLAG_PARAMS)}",
+        )
+    filters = {
+        "queue": queue,
+        "status": status,
+        "priority_band": priority_band,
+        "flag": flag,
+        "backend": backend,
+        "q": q,
+    }
+    rows = get_service().queue(filters)
+    return {"tickets": rows, "count": len(rows)}
 
 
 @app.get("/metrics")
 def metrics():
     return get_service().metrics()
+
+
+# ---------------------------------------------------------------------------
+# stats, policy, outcomes (the dashboards' API)
+# ---------------------------------------------------------------------------
+
+
+@app.get("/api/stats/overview")
+def stats_overview():
+    return get_service().stats_overview()
+
+
+@app.get("/api/stats/performance")
+def stats_performance():
+    return get_service().stats_performance()
+
+
+@app.get("/api/stats/calibration")
+def stats_calibration():
+    """Eval-pack calibration next to live calibration, in one payload.
+
+    The eval section is whatever the last eval run wrote (``null``
+    with a note when no run has happened yet — the dashboard renders
+    the honest empty state instead of the endpoint 404ing); the live
+    section scores recorded probabilities against agent outcomes and
+    says so plainly when no outcomes exist yet.
+    """
+    try:
+        eval_payload = _results_payload("calibration_results.json", "calibration")
+    except HTTPException:
+        eval_payload = None
+    return {
+        "eval": eval_payload,
+        "eval_note": None if eval_payload else "no calibration eval results yet — run the eval pack (make evals)",
+        "live": get_service().live_calibration(),
+    }
+
+
+@app.get("/api/policy")
+def policy():
+    from .composition import policy_snapshot
+
+    return policy_snapshot()
+
+
+class OutcomeRequest(BaseModel):
+    final_category: str = ""
+    final_queue: str = ""
+    resolved: bool = False
+    by: str = ""
+    # Agent-facing truth keys (was_pii, was_outage, …) or question keys;
+    # normalised + validated in livecal before anything is stored.
+    verify_truth: dict[str, bool] = {}
+    score_truth: dict[str, int] = {}
+
+
+@app.post("/api/runs/{ticket_id}/outcome")
+def record_outcome(ticket_id: str, body: OutcomeRequest, request: Request):
+    require_api_key(request)
+    from .livecal import (
+        normalise_score_truth,
+        normalise_verify_truth,
+        validate_final_category,
+    )
+    from .schemas import AgentOutcome
+
+    try:
+        outcome = AgentOutcome(
+            final_category=validate_final_category(body.final_category),
+            final_queue=body.final_queue.strip(),
+            resolved=bool(body.resolved),
+            recorded_by=body.by,
+            verify_truth=normalise_verify_truth(body.verify_truth),
+            score_truth=normalise_score_truth(body.score_truth),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    try:
+        record = get_service().record_outcome(ticket_id, outcome)
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"unknown ticket {ticket_id!r}")
+    return record.model_dump()
 
 
 # ---------------------------------------------------------------------------

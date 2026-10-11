@@ -224,3 +224,62 @@ def recommend_autonomy(
     return AutonomyRecommendation(
         eligible=not blockers, reasons=reasons, blockers=blockers
     )
+
+
+# --- the policy, as data ---------------------------------------------------
+
+
+def policy_snapshot() -> dict:
+    """The composition policy as one read-only document.
+
+    Everything a reviewer or the console's what-if panel needs to see
+    the rules the runs were composed under: the priority formula and
+    its weights, the band floors, the routing matrix with its
+    refinements and overrides, the guardrail forcing thresholds, and
+    the autonomy bar. Derived from the constants above (and the
+    guardrail module's) — never a second copy that could drift.
+    """
+    from .guardrails import (
+        CATEGORY_MIN_CONFIDENCE,
+        GATING_VERIFY,
+        VERIFY_DECISIVE_HIGH,
+        VERIFY_DECISIVE_LOW,
+    )
+    from .questions import CATEGORIES, PRODUCT_AREAS
+
+    return {
+        "priority": {
+            "weights": dict(PRIORITY_WEIGHTS),
+            "outage_boost": OUTAGE_BOOST,
+            "flag_threshold": FLAG_THRESHOLD,
+            "bands": [
+                {"band": name, "min_score": floor} for floor, name in BANDS
+            ],
+        },
+        "routing": {
+            "queues": list(QUEUES),
+            "categories": list(CATEGORIES),
+            "product_areas": list(PRODUCT_AREAS),
+            "category_queues": dict(_CATEGORY_QUEUE),
+            "area_refinements": {
+                f"{category} × {area}": queue
+                for (category, area), queue in sorted(_AREA_REFINEMENTS.items())
+            },
+            "overrides": [
+                {"flag": "mentions_legal", "queue": "compliance_review", "precedence": 1},
+                {"flag": "is_outage_report", "queue": "incident_response", "precedence": 2},
+                {"flag": "needs_engineering", "queue": "engineering_escalation", "precedence": 3},
+            ],
+        },
+        "guardrails": {
+            "category_min_confidence": CATEGORY_MIN_CONFIDENCE,
+            "verify_decisive_low": VERIFY_DECISIVE_LOW,
+            "verify_decisive_high": VERIFY_DECISIVE_HIGH,
+            "gating_verify": list(GATING_VERIFY),
+        },
+        "autonomy": {
+            "auto_resolvable_categories": sorted(AUTO_RESOLVABLE_CATEGORIES),
+            "min_category_confidence": AUTO_MIN_CATEGORY_CONFIDENCE,
+            "note": "advisory only — computed on every run, never acted on",
+        },
+    }

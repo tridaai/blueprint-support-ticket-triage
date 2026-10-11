@@ -49,9 +49,55 @@ class StoreBase:
     def get_input(self, ticket_id: str) -> TicketInput | None:
         return None
 
-    def queue_summary(self) -> list[dict]:
-        """Open tickets (awaiting an agent), newest priority first."""
-        records = [r for r in self.all_records() if r.status in OPEN_STATUSES]
+    # -- run-error telemetry ------------------------------------------------
+    # Failed runs produce no record, so their telemetry lives here: a
+    # small append-only log the performance stats count per backend.
+    # The default implementation is process-local (right for the test
+    # doubles); PostgresStore persists it in the run_errors table.
+
+    def save_error(self, entry: dict) -> None:
+        self.__dict__.setdefault("_error_log", []).append(dict(entry))
+
+    def all_errors(self) -> list[dict]:
+        return [dict(e) for e in self.__dict__.get("_error_log", [])]
+
+    def queue_summary(self, filters: dict | None = None) -> list[dict]:
+        """Ticket rows for the console queue, highest priority first.
+
+        Unfiltered, this is the open queue (round-1 behaviour: only
+        tickets awaiting an agent). ``filters`` may carry ``queue``,
+        ``status``, ``priority_band``, ``flag`` (a verify key that
+        must be raised), ``backend`` and ``q`` (case-insensitive text
+        over subject and sender); naming a ``status`` searches across
+        decided tickets too.
+        """
+        filters = filters or {}
+        records = list(self.all_records())
+        if filters.get("status"):
+            records = [r for r in records if r.status == filters["status"]]
+        else:
+            records = [r for r in records if r.status in OPEN_STATUSES]
+        if filters.get("queue"):
+            records = [r for r in records if r.composition.queue == filters["queue"]]
+        if filters.get("priority_band"):
+            records = [
+                r for r in records if r.composition.priority_band == filters["priority_band"]
+            ]
+        if filters.get("flag"):
+            records = [r for r in records if r.composition.flags.get(filters["flag"])]
+        if filters.get("backend"):
+            records = [
+                r
+                for r in records
+                if (r.telemetry.backend if r.telemetry else "") == filters["backend"]
+            ]
+        if filters.get("q"):
+            needle = str(filters["q"]).lower()
+            records = [
+                r
+                for r in records
+                if needle in r.subject.lower() or needle in r.sender_name.lower()
+            ]
         records.sort(key=lambda r: r.composition.priority_score, reverse=True)
         return [
             {
@@ -65,6 +111,8 @@ class StoreBase:
                 "priority_band": r.composition.priority_band,
                 "queue": r.composition.queue,
                 "status": r.status,
+                "backend": r.telemetry.backend if r.telemetry else "",
+                "flags": dict(r.composition.flags),
                 "decision_confidence": round(
                     max((a.confidence for a in r.answers), default=0.0), 3
                 ),
@@ -158,19 +206,23 @@ class PostgresStore(StoreBase):
 
     def save(self, record: TicketResult) -> None:
         payload = json.dumps(record.model_dump())
+        outcome = (
+            json.dumps(record.outcome.model_dump()) if record.outcome is not None else None
+        )
         decided = record.status in ("triaged", "rejected")
         with self._connect() as conn:
             with conn.cursor() as cur:
                 cur.execute(
                     """
-                    INSERT INTO ticket_records (ticket_id, status, queue, priority, decided, payload, updated_at)
-                    VALUES (%s, %s, %s, %s, %s, %s::jsonb, now())
+                    INSERT INTO ticket_records (ticket_id, status, queue, priority, decided, payload, outcome, updated_at)
+                    VALUES (%s, %s, %s, %s, %s, %s::jsonb, %s::jsonb, now())
                     ON CONFLICT (ticket_id) DO UPDATE
                     SET status = EXCLUDED.status,
                         queue = EXCLUDED.queue,
                         priority = EXCLUDED.priority,
                         decided = EXCLUDED.decided,
                         payload = EXCLUDED.payload,
+                        outcome = EXCLUDED.outcome,
                         updated_at = now()
                     """,
                     (
@@ -180,9 +232,40 @@ class PostgresStore(StoreBase):
                         record.composition.priority_score,
                         decided,
                         payload,
+                        outcome,
                     ),
                 )
             conn.commit()
+
+    def save_error(self, entry: dict) -> None:
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "INSERT INTO run_errors (ticket_id, backend, error) VALUES (%s, %s, %s)",
+                    (
+                        str(entry.get("ticket_id", "")),
+                        str(entry.get("backend", "")),
+                        str(entry.get("error", "")),
+                    ),
+                )
+            conn.commit()
+
+    def all_errors(self) -> list[dict]:
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT ticket_id, backend, error, at FROM run_errors ORDER BY id"
+                )
+                rows = cur.fetchall()
+        return [
+            {
+                "ticket_id": row[0],
+                "backend": row[1],
+                "error": row[2],
+                "at": row[3].isoformat() if hasattr(row[3], "isoformat") else str(row[3]),
+            }
+            for row in rows
+        ]
 
     def get(self, ticket_id: str) -> TicketResult | None:
         with self._connect() as conn:

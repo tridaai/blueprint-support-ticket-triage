@@ -23,7 +23,7 @@ from langgraph.types import Command
 from .events import CollectingSink, RunEvent
 from .graph import AgentRun, build_graph
 from .ports import Checkpointer, DecisionEngine, Embedder, EventSink, ObjectStore, Store, VectorIndex
-from .schemas import TicketInput, TicketResult
+from .schemas import AgentOutcome, TicketInput, TicketResult
 
 
 class TriageService:
@@ -74,6 +74,17 @@ class TriageService:
             sink.emit(
                 RunEvent(type="run_failed", ticket_id=ticket.ticket_id, detail={"error": str(exc)})
             )
+            try:
+                self.store.save_error(
+                    {
+                        "ticket_id": ticket.ticket_id,
+                        "backend": getattr(self.engine, "name", ""),
+                        "error": str(exc),
+                        "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                    }
+                )
+            except Exception:
+                pass  # telemetry must never mask the run's real error
             raise
         awaiting = "__interrupt__" in final
         result = TicketResult.model_validate(final["result"])
@@ -160,13 +171,45 @@ class TriageService:
         except Exception:
             return None
 
+    # -- outcomes + stats ----------------------------------------------------
+
+    def record_outcome(self, ticket_id: str, outcome: AgentOutcome) -> TicketResult:
+        """Attach the agent's ground truth to a handled ticket's record.
+
+        The outcome is the label live calibration reads; recording one
+        never changes the triage itself. Re-recording replaces the
+        previous outcome (agents correct themselves too).
+        """
+        record = self.store.get(ticket_id)
+        if record is None:
+            raise KeyError(f"unknown ticket {ticket_id!r}")
+        outcome.recorded_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        record.outcome = outcome
+        self.store.save(record)
+        return record
+
+    def stats_overview(self) -> dict:
+        from .stats import overview_stats
+
+        return overview_stats(self.store.all_records())
+
+    def stats_performance(self) -> dict:
+        from .stats import performance_stats
+
+        return performance_stats(self.store.all_records(), self.store.all_errors())
+
+    def live_calibration(self) -> dict:
+        from .livecal import live_calibration
+
+        return live_calibration(self.store.all_records())
+
     # -- reads --------------------------------------------------------------
 
     def get_record(self, ticket_id: str) -> TicketResult | None:
         return self.store.get(ticket_id)
 
-    def queue(self) -> list[dict]:
-        return self.store.queue_summary()
+    def queue(self, filters: dict | None = None) -> list[dict]:
+        return self.store.queue_summary(filters)
 
     def metrics(self) -> dict:
         return self.store.metrics()

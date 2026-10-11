@@ -184,9 +184,14 @@ def test_dotenv_parser(tmp_path):
 
 def test_migrations_are_numbered_and_cover_both_tables():
     files = sorted((REPO_ROOT / "migrations").glob("[0-9]*.sql"))
-    assert [f.name for f in files] == ["0001_ticket_records.sql", "0002_ticket_embeddings.sql"]
+    assert [f.name for f in files] == [
+        "0001_ticket_records.sql",
+        "0002_ticket_embeddings.sql",
+        "0003_outcomes_and_run_errors.sql",
+    ]
     text = "".join(f.read_text() for f in files)
     assert "ticket_records" in text and "ticket_embeddings" in text
+    assert "outcome" in text and "run_errors" in text
     assert "CREATE EXTENSION" in text and "vector" in text
 
 
