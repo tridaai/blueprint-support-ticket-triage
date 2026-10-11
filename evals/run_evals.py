@@ -987,6 +987,228 @@ def check_template_case(service: TriageService, case: dict) -> list[str]:
     return failures
 
 
+def check_incident_case(service: TriageService, case: dict) -> list[str]:
+    """An incident-clustering case (incidents.py).
+
+    Seeds a staged world of tickets — each seed's decided
+    placement is asserted as a premise (a seed that lands in the
+    wrong bucket proves nothing) — then applies the case's
+    ``incident_actions`` in order: scans judged on the exact
+    proposal member sets, confirmations and dismissals by member
+    set, late arrivals run in mid-case, addition lists, per-ticket
+    add/decline decisions, and closure. After EVERY action the
+    stored run records are checked byte-identical against the
+    snapshot (extended whenever a new ticket is run in): the
+    whole lifecycle is an overlay, and this is where that promise
+    is kept or broken.
+    """
+    failures: list[str] = []
+
+    def run_seed(entry: dict) -> None:
+        ticket = TicketInput.model_validate(entry["ticket"])
+        result = service.run_ticket(ticket).result
+        placement = entry.get("expect_placement") or {}
+        for field in ("category", "product_area"):
+            wanted = placement.get(field)
+            if wanted and getattr(result, field) != wanted:
+                failures.append(
+                    f"{ticket.ticket_id}: premise broken — decided "
+                    f"{field} {getattr(result, field)!r}, expected {wanted!r}; "
+                    "the clustering judgement would prove nothing"
+                )
+
+    for entry in case.get("incident_seed", []):
+        run_seed(entry)
+
+    snapshot = {
+        record.ticket_id: record.model_dump_json()
+        for record in service.store.all_records()
+    }
+
+    def records_unchanged(label: str) -> None:
+        current = {
+            record.ticket_id: record.model_dump_json()
+            for record in service.store.all_records()
+        }
+        for ticket_id, before in snapshot.items():
+            if current.get(ticket_id) != before:
+                failures.append(
+                    f"{label}: run {ticket_id}'s record changed — incident "
+                    "acts are an overlay and must never write to a run"
+                )
+        snapshot.update(
+            {tid: blob for tid, blob in current.items() if tid not in snapshot}
+        )
+
+    def proposal_for(members: list[str]) -> dict | None:
+        wanted = sorted(members)
+        for proposal in service.cluster_proposals()["proposals"]:
+            if sorted(m["ticket_id"] for m in proposal["members"]) == wanted:
+                return proposal
+        return None
+
+    for index, action in enumerate(case.get("incident_actions", [])):
+        kind = action["type"]
+        label = f"action {index} ({kind})"
+        expect_error = action.get("expect_error")
+        try:
+            if kind == "scan":
+                payload = service.cluster_proposals()
+                got = [
+                    [m["ticket_id"] for m in proposal["members"]]
+                    for proposal in payload["proposals"]
+                ]
+                wanted = [entry["members"] for entry in action["expect_proposals"]]
+                if got != wanted:
+                    failures.append(
+                        f"{label}: proposals {got}, expected {wanted}"
+                    )
+                for entry in action["expect_proposals"]:
+                    proposal = proposal_for(entry["members"])
+                    if proposal is None:
+                        continue
+                    if "outgrows_dismissal" in entry:
+                        outgrows = proposal["outgrows_dismissal"] is not None
+                        if outgrows != entry["outgrows_dismissal"]:
+                            failures.append(
+                                f"{label}: proposal {entry['members']} "
+                                f"outgrows_dismissal is {outgrows}, "
+                                f"expected {entry['outgrows_dismissal']}"
+                            )
+                    signals = proposal["signals"]
+                    for key, wanted_value in (entry.get("signals") or {}).items():
+                        if signals.get(key) != wanted_value:
+                            failures.append(
+                                f"{label}: signal {key!r} = "
+                                f"{signals.get(key)}, expected {wanted_value}"
+                            )
+                if "expect_suppressed" in action:
+                    if payload["suppressed_dismissed"] != action["expect_suppressed"]:
+                        failures.append(
+                            f"{label}: suppressed_dismissed = "
+                            f"{payload['suppressed_dismissed']}, expected "
+                            f"{action['expect_suppressed']}"
+                        )
+            elif kind == "run":
+                run_seed(action)
+            elif kind == "confirm":
+                proposal = proposal_for(action["members"])
+                if proposal is None:
+                    failures.append(
+                        f"{label}: no live proposal for members "
+                        f"{action['members']} to confirm"
+                    )
+                else:
+                    incident = service.confirm_cluster(
+                        proposal["proposal_id"],
+                        actor=action.get("actor", "eval-lead"),
+                        title=action.get("title", ""),
+                    )
+                    if action.get("expect_incident") and (
+                        incident.incident_id != action["expect_incident"]
+                    ):
+                        failures.append(
+                            f"{label}: confirmed as {incident.incident_id}, "
+                            f"expected {action['expect_incident']}"
+                        )
+                    origins = {m.ticket_id: m.origin for m in incident.members}
+                    if origins != {tid: "proposal" for tid in action["members"]}:
+                        failures.append(
+                            f"{label}: member origins {origins}, expected all "
+                            "'proposal' over the confirmed set"
+                        )
+            elif kind == "dismiss":
+                proposal = proposal_for(action["members"])
+                if proposal is None:
+                    failures.append(
+                        f"{label}: no live proposal for members "
+                        f"{action['members']} to dismiss"
+                    )
+                else:
+                    dismissal = service.dismiss_cluster(
+                        proposal["proposal_id"],
+                        actor=action.get("actor", "eval-lead"),
+                        reason=action.get("reason", "eval dismissal"),
+                    )
+                    if dismissal.member_ticket_ids != sorted(action["members"]):
+                        failures.append(
+                            f"{label}: dismissal stored "
+                            f"{dismissal.member_ticket_ids}, expected "
+                            f"{sorted(action['members'])}"
+                        )
+            elif kind == "expect_additions":
+                got = [
+                    c["ticket_id"]
+                    for c in service.incident_additions(action["incident"])
+                ]
+                for ticket_id in action.get("contains", []):
+                    if ticket_id not in got:
+                        failures.append(
+                            f"{label}: additions {got} missing {ticket_id}"
+                        )
+                for ticket_id in action.get("excludes", []):
+                    if ticket_id in got:
+                        failures.append(
+                            f"{label}: additions {got} must exclude {ticket_id}"
+                        )
+            elif kind == "add":
+                service.add_incident_member(
+                    action["incident"],
+                    action["ticket"],
+                    actor=action.get("actor", "eval-lead"),
+                )
+            elif kind == "decline":
+                service.decline_incident_addition(
+                    action["incident"],
+                    action["ticket"],
+                    actor=action.get("actor", "eval-lead"),
+                    reason=action.get("reason", ""),
+                )
+            elif kind == "close":
+                service.close_incident(
+                    action["incident"],
+                    actor=action.get("actor", "eval-lead"),
+                    reason=action.get("reason", "eval closure"),
+                )
+            elif kind == "expect_incident":
+                view = service.get_incident(action["incident"])
+                record = view["incident"]
+                if record["status"] != action["status"]:
+                    failures.append(
+                        f"{label}: incident status {record['status']}, "
+                        f"expected {action['status']}"
+                    )
+                member_ids = [m["ticket_id"] for m in view["members"]]
+                if member_ids != action["members"]:
+                    failures.append(
+                        f"{label}: members {member_ids}, expected "
+                        f"{action['members']}"
+                    )
+                for ticket_id, origin in (action.get("origins") or {}).items():
+                    member = next(
+                        (m for m in view["members"] if m["ticket_id"] == ticket_id),
+                        None,
+                    )
+                    if member is None or member["origin"] != origin:
+                        failures.append(
+                            f"{label}: member {ticket_id} origin "
+                            f"{member and member['origin']}, expected {origin!r}"
+                        )
+            else:
+                failures.append(f"{label}: unknown incident action {kind!r}")
+        except Exception as exc:  # a refusal is an IncidentError by design
+            if not (expect_error and expect_error in str(exc)):
+                failures.append(f"{label}: raised unexpectedly: {exc}")
+        else:
+            if expect_error:
+                failures.append(
+                    f"{label}: should have been refused ({expect_error!r}) "
+                    "but succeeded"
+                )
+        records_unchanged(label)
+    return failures
+
+
 def main() -> int:
     cases = load_cases()
     service = fresh_service()
@@ -997,6 +1219,8 @@ def main() -> int:
         # only a case's own `previous` ticket may link to it.
         if "template_seed" in case:
             failures = check_template_case(fresh_service(), case)
+        elif "incident_seed" in case:
+            failures = check_incident_case(fresh_service(), case)
         elif "qa_sample" in case:
             failures = check_review_case(fresh_service(), case)
         elif "dossier_seed" in case or "dossier_new_ticket" in case:

@@ -189,11 +189,13 @@ def test_migrations_are_numbered_and_cover_both_tables():
         "0002_ticket_embeddings.sql",
         "0003_outcomes_and_run_errors.sql",
         "0004_review_samples.sql",
+        "0005_incidents.sql",
     ]
     text = "".join(f.read_text() for f in files)
     assert "ticket_records" in text and "ticket_embeddings" in text
     assert "outcome" in text and "run_errors" in text
     assert "review_samples" in text and "review_verdicts" in text
+    assert "incidents" in text and "cluster_dismissals" in text
     assert "CREATE EXTENSION" in text and "vector" in text
 
 
