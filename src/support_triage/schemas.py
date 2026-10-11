@@ -103,6 +103,10 @@ class AgentOutcome(BaseModel):
     resolved: bool = False
     recorded_by: str = ""
     recorded_at: str = ""  # ISO datetime, stamped by the service
+    # The agent's own words for how it ended — free text, optional.
+    # The workbench (workbench.py) shows it to the next agent facing
+    # a similar ticket; it plays no part in calibration.
+    resolution_summary: str = ""
     verify_truth: dict[str, bool] = Field(default_factory=dict)
     score_truth: dict[str, int] = Field(default_factory=dict)
 
@@ -185,6 +189,60 @@ class DuplicateMark(BaseModel):
         return not self.unmarked_at
 
 
+class PlaybookCheck(BaseModel):
+    """One check-off action on the run's category playbook.
+
+    An append-only overlay (the corrections precedent): checking a
+    step appends ``action="checked"``, unchecking appends
+    ``"unchecked"`` — the effective state of a step is its LAST
+    entry, and the whole trail stays on the record. Playbook
+    progress is guidance bookkeeping for the human working the
+    ticket: it never feeds composition, guardrails, calibration, or
+    the run's state.
+    """
+
+    step_id: str = ""
+    action: str = ""  # checked | unchecked
+    by: str = ""  # the agent who acted
+    at: str = ""  # ISO datetime, stamped by the service
+
+
+class PlaybookNaMark(BaseModel):
+    """The playbook set marked not-applicable for this run, or lifted.
+
+    Append-only like the checks: ``action="marked"`` carries the
+    agent's reason; ``"lifted"`` restores the steps. The effective
+    state is the last entry. A marked set refuses step checks until
+    it is lifted — working a playbook you have declared irrelevant
+    is exactly the box-ticking the mark exists to prevent.
+    """
+
+    action: str = ""  # marked | lifted
+    by: str = ""
+    reason: str = ""  # required on "marked"; the lift may restate it
+    at: str = ""  # ISO datetime, stamped by the service
+
+    @property
+    def active(self) -> bool:
+        return self.action == "marked"
+
+
+class WorkingNote(BaseModel):
+    """The agent's saved internal working note for this run.
+
+    Starts life as the deterministic draft :mod:`workbench`
+    composes from the record; the agent edits it and saves it back.
+    Internal, always: it is not the customer template draft
+    (``DraftInfo``), it is never sent anywhere, and saving it
+    changes nothing about the triage — it is the agent's own
+    handwriting on the file.
+    """
+
+    text: str = ""
+    saved_by: str = ""
+    saved_at: str = ""  # ISO datetime, stamped by the service
+
+
 class RunTelemetry(BaseModel):
     backend: str = ""
     model: str = ""
@@ -242,6 +300,13 @@ class TicketResult(BaseModel):
     # the human's confirmation of it (or of a pair the machine missed).
     duplicate_marks: list[DuplicateMark] = Field(default_factory=list)
     duplicate_of: str = ""
+    # The agent's workbench (workbench.py): playbook check-offs and
+    # not-applicable marks for the run's category, and the saved
+    # internal working note. All overlays on the record like the
+    # corrections above — the decision record itself is untouched.
+    playbook_checks: list[PlaybookCheck] = Field(default_factory=list)
+    playbook_na: list[PlaybookNaMark] = Field(default_factory=list)
+    working_note: Optional[WorkingNote] = None
     external_action_taken: bool = False  # invariant: always False
     trace: list[TraceStep] = Field(default_factory=list)
     telemetry: Optional[RunTelemetry] = None

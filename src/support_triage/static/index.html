@@ -186,6 +186,8 @@
       <select id="o-queue"><option value="">— not judged —</option></select>
       <div class="truth-grid" style="margin-top:10px" id="o-truths"></div>
       <label style="margin-top:10px"><input type="checkbox" id="o-resolved" style="width:auto"> Resolved</label>
+      <label for="o-summary">Resolution summary (your words — the workbench shows it to the next agent with a similar ticket)</label>
+      <input type="text" id="o-summary" placeholder="e.g. Refunded the duplicate charge; card re-issue not needed">
       <div class="row" style="margin-top:10px">
         <button class="primary" id="o-submit">Record outcome</button>
         <span class="note" id="o-status"></span>
@@ -470,6 +472,16 @@ function renderResult(r) {
     ${r.draft ? `<h2 style="margin-top:18px">Template draft (for the agent — never sent by the system)</h2><pre>${esc(r.draft.text)}</pre>` : ''}
     <h2 style="margin-top:18px">Similar past tickets</h2>
     <div id="similar-box" class="empty">Loading…</div>
+    <h2 style="margin-top:18px">Workbench — how tickets like this ended, the playbook, your note</h2>
+    <p class="note">Resolution knowledge joins the similar tickets to their recorded outcomes (small samples are labelled, not dressed up). The playbook is guidance — nothing executes or blocks on it. The working note is an INTERNAL draft composed from this record; edit and save it under your name. It is not the customer template draft and is never sent.</p>
+    <div id="wb-knowledge" class="empty">Loading…</div>
+    <div id="wb-playbook" style="margin-top:12px"></div>
+    <label for="wb-note" style="margin-top:12px">Internal working note (draft composed by code — edit before saving)</label>
+    <textarea id="wb-note" spellcheck="false" style="min-height:150px"></textarea>
+    <div class="row" style="margin-top:8px">
+      <button id="wb-note-save">Save working note</button>
+      <span class="note" id="wb-status">saved under the agent name from the gate form (section 3)</span>
+    </div>
     <h2 style="margin-top:18px">Assignment suggestion <span class="note">(advisory — a human assigns)</span></h2>
     <div id="assignment-box" class="empty">Loading…</div>
     <h2 style="margin-top:18px">Conversation thread</h2>
@@ -501,6 +513,7 @@ function renderResult(r) {
   loadSimilar(r.ticket_id);
   loadAssignment(r.ticket_id);
   loadRunThread(r.ticket_id);
+  loadWorkbench(r.ticket_id);
   $('reopen-run').onclick = () => submitReopen(r.ticket_id);
   $('dup-mark').onclick = () => submitDuplicateMark(r.ticket_id);
   $('dup-unmark').onclick = () => submitDuplicateUnmark(r.ticket_id);
@@ -514,6 +527,7 @@ function renderResult(r) {
     $('o-category').value = r.outcome.final_category || '';
     $('o-queue').value = r.outcome.final_queue || '';
     $('o-resolved').checked = !!r.outcome.resolved;
+    $('o-summary').value = r.outcome.resolution_summary || '';
     document.querySelectorAll('#o-truths select').forEach(sel => {
       const v = (r.outcome.verify_truth || {})[sel.dataset.key];
       sel.value = v === undefined ? '' : String(v);
@@ -600,6 +614,104 @@ async function loadSimilar(id) {
     box.className = 'empty';
     box.textContent = 'Similar tickets unavailable.';
   }
+}
+
+async function wbPost(id, path, body) {
+  const res = await fetch(`/api/runs/${encodeURIComponent(id)}/workbench${path}`, {
+    method: 'POST', headers: headers(), body: JSON.stringify(body)
+  });
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.detail || res.statusText);
+  return data;
+}
+
+async function loadWorkbench(id) {
+  const kbox = $('wb-knowledge');
+  const pbox = $('wb-playbook');
+  if (!kbox || !pbox) return;
+  try {
+    const res = await fetch(`/api/runs/${encodeURIComponent(id)}/workbench`, {headers: headers()});
+    if (!res.ok) throw new Error('unavailable');
+    const wb = await res.json();
+    const agg = wb.knowledge.aggregate;
+    kbox.className = '';
+    if (!wb.knowledge.entries.length) {
+      kbox.innerHTML = `<p class="note" style="margin:0">${esc(agg.note)}</p>`;
+    } else {
+      const rows = wb.knowledge.entries.map(e => `<tr><td>${esc(e.ticket_id)}<br><span class="note">${esc(e.subject)}</span></td><td>${(e.similarity * 100).toFixed(0)}%</td><td>${e.resolved ? pill('resolved', 'good') : pill('not resolved', 'warn')}<br><span class="note">${esc(e.final_category || '—')} → ${esc(e.final_queue || '—')}${e.hours_from_intake !== null && e.hours_from_intake !== undefined ? ` · ${e.hours_from_intake}h intake→outcome` : ''}</span>${e.resolution_summary ? `<br>${esc(e.resolution_summary)}` : '<br><span class="note">no resolution summary recorded</span>'}</td></tr>`).join('');
+      const figures = agg.resolved_rate !== null
+        ? ` · resolution rate <strong>${(agg.resolved_rate * 100).toFixed(0)}%</strong>${agg.median_hours_from_intake !== null ? ` · median <strong>${agg.median_hours_from_intake}h</strong> intake→outcome` : ''}`
+        : '';
+      kbox.innerHTML = `<p class="note" style="margin-top:0">${agg.with_outcome} similar ticket(s) with outcomes${figures}<br>${esc(agg.note)}</p><table><tr><th>Ticket</th><th>Similarity</th><th>How it ended</th></tr>${rows}</table>`;
+    }
+    renderPlaybook(id, wb.playbook);
+    const note = wb.working_note;
+    $('wb-note').value = note.saved ? note.saved.text : note.draft;
+    $('wb-status').textContent = note.saved
+      ? `saved note by ${note.saved.saved_by} at ${note.saved.saved_at} — edit and save to replace it`
+      : 'draft composed by code — edit and save it under your name (gate form, section 3)';
+    $('wb-note-save').onclick = async () => {
+      const actor = $('actor').value.trim();
+      if (!actor) { $('wb-status').textContent = 'give your name in the gate form (section 3) first'; return; }
+      $('wb-status').textContent = 'saving note…';
+      try {
+        await wbPost(id, '/note', {text: $('wb-note').value, actor});
+        $('wb-status').textContent = 'working note saved on the record';
+        loadWorkbench(id);
+      } catch (e) { $('wb-status').textContent = 'error: ' + e.message; }
+    };
+  } catch (e) {
+    kbox.className = 'empty';
+    kbox.textContent = 'Workbench unavailable.';
+  }
+}
+
+function renderPlaybook(id, pb) {
+  const box = $('wb-playbook');
+  if (!pb.available) {
+    box.innerHTML = `<p class="note" style="margin:0">Playbook: ${esc(pb.note)}</p>`;
+    return;
+  }
+  const na = pb.not_applicable;
+  const steps = pb.steps.map(s => `
+    <li><label style="display:inline"><input type="checkbox" class="wb-step" data-step="${esc(s.id)}" ${s.checked ? 'checked' : ''} ${na ? 'disabled' : ''} style="width:auto"> ${esc(s.text)}</label>
+    ${s.reference ? `<span class="note">(${esc(s.reference)})</span>` : ''}
+    ${s.checked ? `<span class="note">— ${esc(s.by)} · ${esc(s.at)}</span>` : ''}</li>`).join('');
+  box.innerHTML = `
+    <p style="margin:0 0 6px"><strong>Playbook — ${esc(pb.category)}</strong> <span class="note">${pb.checked_count}/${pb.steps.length} checked · guidance only</span></p>
+    ${na ? `<p>Marked not-applicable by ${esc(na.by)} — ${esc(na.reason)} <button id="wb-na-lift">Lift the mark</button></p>` : `
+    <ul style="margin:0">${steps}</ul>
+    <div class="row" style="margin-top:8px">
+      <input type="text" id="wb-na-reason" placeholder="why the playbook does not fit this ticket">
+      <button id="wb-na-mark">Mark playbook not-applicable</button>
+    </div>`}
+    <span class="note" id="wb-pb-status"></span>`;
+  const actor = () => $('actor').value.trim();
+  box.querySelectorAll('.wb-step').forEach(cb => cb.onchange = async () => {
+    if (!actor()) { $('wb-pb-status').textContent = 'give your name in the gate form (section 3) first'; cb.checked = !cb.checked; return; }
+    try {
+      await wbPost(id, cb.checked ? '/playbook/check' : '/playbook/uncheck', {step_id: cb.dataset.step, actor: actor()});
+      loadWorkbench(id);
+    } catch (e) { $('wb-pb-status').textContent = 'error: ' + e.message; cb.checked = !cb.checked; }
+  });
+  const markBtn = $('wb-na-mark');
+  if (markBtn) markBtn.onclick = async () => {
+    if (!actor()) { $('wb-pb-status').textContent = 'give your name in the gate form (section 3) first'; return; }
+    const reason = $('wb-na-reason').value.trim();
+    if (!reason) { $('wb-pb-status').textContent = 'a not-applicable mark needs the reason'; return; }
+    try {
+      await wbPost(id, '/playbook/not-applicable', {actor: actor(), reason});
+      loadWorkbench(id);
+    } catch (e) { $('wb-pb-status').textContent = 'error: ' + e.message; }
+  };
+  const liftBtn = $('wb-na-lift');
+  if (liftBtn) liftBtn.onclick = async () => {
+    if (!actor()) { $('wb-pb-status').textContent = 'give your name in the gate form (section 3) first'; return; }
+    try {
+      await wbPost(id, '/playbook/applicable', {actor: actor()});
+      loadWorkbench(id);
+    } catch (e) { $('wb-pb-status').textContent = 'error: ' + e.message; }
+  };
 }
 
 function threadChainTable(chain) {
@@ -1218,6 +1330,7 @@ $('o-submit').onclick = async () => {
     final_category: $('o-category').value,
     final_queue: $('o-queue').value,
     resolved: $('o-resolved').checked,
+    resolution_summary: $('o-summary').value.trim(),
     by: $('actor').value.trim(),
     verify_truth,
     score_truth: {},

@@ -51,6 +51,15 @@ every route delegates, none re-implements. Notable behaviour:
   confirm or lift a duplicate judgement — a confirmed duplicate
   leaves the calibration samples and the drift window, accounted
   in both payloads, while still counting in volume stats;
+- the agent's workbench (workbench.py): ``GET
+  /api/runs/{id}/workbench`` (and its ``/knowledge``,
+  ``/playbook``, ``/note`` parts) joins similar tickets to their
+  outcomes, serves the run's category playbook, and composes the
+  internal working-note draft; ``POST .../workbench/playbook/check``
+  / ``.../uncheck`` / ``.../not-applicable`` / ``.../applicable``
+  record the agent's playbook progress, and ``POST
+  .../workbench/note`` saves their edited note — overlays on the
+  record, all of them; the triage itself is never touched;
 - ``/readiness`` fails (503) when PostgreSQL is configured but
   unreachable, and says honestly when the in-memory test doubles are
   in use (records lost on restart — fine for a look, not for work).
@@ -553,6 +562,9 @@ class OutcomeRequest(BaseModel):
     final_queue: str = ""
     resolved: bool = False
     by: str = ""
+    # How it ended, in the agent's words — the workbench shows it
+    # to the next agent facing a similar ticket. Optional, unjudged.
+    resolution_summary: str = ""
     # Agent-facing truth keys (was_pii, was_outage, …) or question keys;
     # normalised + validated in livecal before anything is stored.
     verify_truth: dict[str, bool] = {}
@@ -575,6 +587,7 @@ def record_outcome(ticket_id: str, body: OutcomeRequest, request: Request):
             final_queue=body.final_queue.strip(),
             resolved=bool(body.resolved),
             recorded_by=body.by,
+            resolution_summary=body.resolution_summary.strip(),
             verify_truth=normalise_verify_truth(body.verify_truth),
             score_truth=normalise_score_truth(body.score_truth),
         )
@@ -911,6 +924,166 @@ def unmark_duplicate(ticket_id: str, body: DuplicateUnmarkRequest, request: Requ
         record = get_service().unmark_duplicate(ticket_id, actor=actor, reason=reason)
     except (KeyError, ValueError) as exc:
         _correction_http(exc)
+    return record.model_dump()
+
+
+# ---------------------------------------------------------------------------
+# the agent's workbench (knowledge, playbook, working note)
+# ---------------------------------------------------------------------------
+
+
+class PlaybookStepRequest(BaseModel):
+    step_id: str  # the playbook step being checked / unchecked
+    actor: str = ""  # who is working the ticket
+
+
+class PlaybookNaRequest(BaseModel):
+    actor: str = ""
+    reason: str = ""  # why the playbook does not fit (mark only)
+
+
+class PlaybookLiftRequest(BaseModel):
+    actor: str = ""
+
+
+class WorkingNoteRequest(BaseModel):
+    text: str  # the agent's edited note
+    actor: str = ""
+
+
+def _workbench_http(exc: Exception):
+    """Map a workbench refusal onto its status: KeyError → 404,
+    WorkbenchError → its own (409 conflict / 422 invalid)."""
+    from .workbench import WorkbenchError
+
+    if isinstance(exc, KeyError):
+        raise HTTPException(status_code=404, detail=exc.args[0] if exc.args else str(exc))
+    if isinstance(exc, WorkbenchError):
+        raise HTTPException(status_code=exc.http_status, detail=str(exc))
+    raise exc
+
+
+def _require_actor_field(actor: str) -> str:
+    if not actor.strip():
+        raise HTTPException(
+            status_code=422, detail="actor is required — a workbench action names who made it"
+        )
+    return actor.strip()
+
+
+@app.get("/api/runs/{ticket_id}/workbench")
+def workbench_view(ticket_id: str):
+    """The whole workbench for one run: resolution knowledge, the
+    category playbook with its progress, and the working-note draft
+    (plus the saved note, when one exists)."""
+    try:
+        return get_service().workbench(ticket_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"unknown ticket {ticket_id!r}")
+
+
+@app.get("/api/runs/{ticket_id}/workbench/knowledge")
+def workbench_knowledge(ticket_id: str):
+    """How similar tickets actually ended: the ones with outcomes,
+    their resolutions as recorded, and the aggregate over them —
+    withheld, with the reason, when the sample is too small."""
+    try:
+        return get_service().workbench_knowledge(ticket_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"unknown ticket {ticket_id!r}")
+
+
+@app.get("/api/runs/{ticket_id}/workbench/playbook")
+def workbench_playbook(ticket_id: str):
+    """The run's category playbook with the agent's progress on it."""
+    try:
+        return get_service().workbench_playbook(ticket_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"unknown ticket {ticket_id!r}")
+
+
+@app.get("/api/runs/{ticket_id}/workbench/note")
+def workbench_note(ticket_id: str):
+    """The internal working-note draft, composed by code from the
+    record — and the saved note, when the agent has saved one. The
+    draft is not stored by reading it; saving is the POST below."""
+    try:
+        return get_service().working_note_draft(ticket_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"unknown ticket {ticket_id!r}")
+
+
+@app.post("/api/runs/{ticket_id}/workbench/playbook/check")
+def check_playbook_step(ticket_id: str, body: PlaybookStepRequest, request: Request):
+    """Check one playbook step off on the record (overlay entry).
+    The response is the updated record; the triage is untouched."""
+    require_api_key(request)
+    actor = _require_actor_field(body.actor)
+    try:
+        record = get_service().check_playbook_step(
+            ticket_id, body.step_id.strip(), actor=actor, checked=True
+        )
+    except (KeyError, ValueError) as exc:
+        _workbench_http(exc)
+    return record.model_dump()
+
+
+@app.post("/api/runs/{ticket_id}/workbench/playbook/uncheck")
+def uncheck_playbook_step(ticket_id: str, body: PlaybookStepRequest, request: Request):
+    """Undo a check-off (the trail keeps both entries)."""
+    require_api_key(request)
+    actor = _require_actor_field(body.actor)
+    try:
+        record = get_service().check_playbook_step(
+            ticket_id, body.step_id.strip(), actor=actor, checked=False
+        )
+    except (KeyError, ValueError) as exc:
+        _workbench_http(exc)
+    return record.model_dump()
+
+
+@app.post("/api/runs/{ticket_id}/workbench/playbook/not-applicable")
+def mark_playbook_na(ticket_id: str, body: PlaybookNaRequest, request: Request):
+    """Mark the run's playbook not-applicable, with the reason.
+    Step checks are refused while the mark stands."""
+    require_api_key(request)
+    actor = _require_actor_field(body.actor)
+    if not body.reason.strip():
+        raise HTTPException(
+            status_code=422,
+            detail="reason is required — a not-applicable mark states why the playbook does not fit",
+        )
+    try:
+        record = get_service().mark_playbook_na(
+            ticket_id, actor=actor, reason=body.reason.strip()
+        )
+    except (KeyError, ValueError) as exc:
+        _workbench_http(exc)
+    return record.model_dump()
+
+
+@app.post("/api/runs/{ticket_id}/workbench/playbook/applicable")
+def lift_playbook_na(ticket_id: str, body: PlaybookLiftRequest, request: Request):
+    """Lift a not-applicable mark (the mark entry stays, audited)."""
+    require_api_key(request)
+    actor = _require_actor_field(body.actor)
+    try:
+        record = get_service().lift_playbook_na(ticket_id, actor=actor)
+    except (KeyError, ValueError) as exc:
+        _workbench_http(exc)
+    return record.model_dump()
+
+
+@app.post("/api/runs/{ticket_id}/workbench/note")
+def save_working_note(ticket_id: str, body: WorkingNoteRequest, request: Request):
+    """Save the agent's edited internal working note on the record.
+    Internal only — this surface has no send path, by design."""
+    require_api_key(request)
+    actor = _require_actor_field(body.actor)
+    try:
+        record = get_service().save_working_note(ticket_id, text=body.text, actor=actor)
+    except (KeyError, ValueError) as exc:
+        _workbench_http(exc)
     return record.model_dump()
 
 

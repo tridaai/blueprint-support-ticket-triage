@@ -26,7 +26,11 @@ still answer every question about the run:
   computed and as corrected (with each correction's actor and
   reason), and any confirmed-duplicate mark — the machine's
   duplicate guess and the human's confirmation are separate blocks,
-  because they are separate judgements.
+  because they are separate judgements;
+- the agent's workbench state (workbench.py): the category
+  playbook's progress (steps ticked, by whom, or the set marked
+  not-applicable and why) and the saved internal working note —
+  the agent's handwriting on the file, exported as such.
 
 Everything here is composed in code from the stored record. No
 model is consulted and no prose is generated: the text rendering is
@@ -38,6 +42,7 @@ from __future__ import annotations
 
 from . import composition as comp
 from . import corrections
+from . import playbooks
 from .schemas import TicketResult
 
 # The formula terms and the answer each one reads, for the trace.
@@ -232,6 +237,15 @@ def build_export(
         if record.decision
         else None,
         "outcome": record.outcome.model_dump() if record.outcome is not None else None,
+        # The workbench (workbench.py): the category playbook with
+        # the agent's progress resolved from the overlay, and the
+        # saved internal working note. The note DRAFT is not
+        # exported — it is recomposed on read; only what the agent
+        # saved under their name is part of the audit record.
+        "playbook": playbooks.playbook_view(record),
+        "working_note": (
+            record.working_note.model_dump() if record.working_note is not None else None
+        ),
         "draft": record.draft.model_dump() if record.draft is not None else None,
         "telemetry": record.telemetry.model_dump() if record.telemetry is not None else None,
         "trace": [step.model_dump() for step in record.trace],
@@ -507,6 +521,33 @@ def render_text(document: dict) -> str:
                 "  score truth: "
                 + " · ".join(f"{k}={v}" for k, v in sorted(outcome["score_truth"].items()))
             )
+
+    lines.append("")
+    lines.append("PLAYBOOK PROGRESS (agent guidance — nothing executes or blocks on it)")
+    playbook = document["playbook"]
+    if not playbook["available"]:
+        lines.append(f"No playbook authored for category '{playbook['category']}'.")
+    else:
+        if playbook["not_applicable"]:
+            na = playbook["not_applicable"]
+            lines.append(
+                f"Marked not-applicable by {na['by'] or 'agent'} at {na['at']} — {na['reason']}"
+            )
+        for step in playbook["steps"]:
+            mark = "x" if step["checked"] else " "
+            suffix = (
+                f" (by {step['by']} at {step['at']})" if step["checked"] else ""
+            )
+            lines.append(f"[{mark}] {step['id']}: {step['text']}{suffix}")
+
+    if document["working_note"]:
+        note = document["working_note"]
+        lines.append("")
+        lines.append(
+            f"INTERNAL WORKING NOTE (saved by {note['saved_by'] or 'agent'} "
+            f"at {note['saved_at']} — internal, never sent)"
+        )
+        lines.append(note["text"])
 
     if document["draft"]:
         lines.append("")

@@ -30,7 +30,7 @@ from datetime import datetime, timezone
 from langgraph.types import Command
 from pydantic import ValidationError
 
-from . import corrections, threads, webhooks
+from . import corrections, playbooks, threads, webhooks, workbench
 from .composition import reopen_limit_in_force
 from .events import CollectingSink, EventBus, RunEvent
 from .graph import AgentRun, build_graph
@@ -952,6 +952,208 @@ class TriageService:
         mark.unmark_reason = reason
         mark.unmarked_at = format_timestamp(datetime.now(timezone.utc))
         record.duplicate_of = ""
+        self.store.save(record)
+        return record
+
+    # -- the agent's workbench (knowledge, playbook, working note) ---------
+
+    @staticmethod
+    def _require_actor(actor: str) -> str:
+        actor = (actor or "").strip()
+        if not actor:
+            raise workbench.WorkbenchError(
+                "actor is required — a workbench action names who made it"
+            )
+        return actor
+
+    def workbench_knowledge(self, ticket_id: str, limit: int = 10) -> dict:
+        """How similar tickets actually ended (workbench.py).
+
+        The similar-tickets machinery, joined to outcomes in code:
+        neighbours with outcomes become knowledge entries with an
+        aggregate over them; neighbours without stay counted as
+        excluded, never silently dropped or silently included.
+        """
+        similar = self.similar_tickets(ticket_id, limit=limit)
+        records = {r.ticket_id: r for r in self.store.all_records()}
+        return {
+            "ticket_id": ticket_id,
+            **workbench.build_knowledge(similar["similar"], records),
+        }
+
+    def workbench_playbook(self, ticket_id: str) -> dict:
+        """The run's category playbook with its check state."""
+        record = self.store.get(ticket_id)
+        if record is None:
+            raise KeyError(f"unknown ticket {ticket_id!r}")
+        return {"ticket_id": ticket_id, **playbooks.playbook_view(record)}
+
+    def working_note_draft(self, ticket_id: str) -> dict:
+        """The deterministic internal note draft for one run.
+
+        A composition, not a write: the draft exists only in this
+        response until an agent saves their edited version through
+        :meth:`save_working_note`.
+        """
+        from .sla import sla_clock
+
+        record = self.store.get(ticket_id)
+        if record is None:
+            raise KeyError(f"unknown ticket {ticket_id!r}")
+        thread = self.run_thread(ticket_id)
+        return {
+            "ticket_id": ticket_id,
+            "draft": workbench.build_working_note(
+                record,
+                grouping=corrections.grouping_view(record),
+                chain_size=thread.get("run_count", 1) or 1,
+                sla=sla_clock(record),
+            ),
+            "saved": record.working_note.model_dump() if record.working_note else None,
+            "note": (
+                "internal draft composed by code from the record — "
+                "not the customer template draft, and never sent"
+            ),
+        }
+
+    def workbench(self, ticket_id: str) -> dict:
+        """The whole workbench for one run: knowledge, playbook, note."""
+        if self.store.get(ticket_id) is None:
+            raise KeyError(f"unknown ticket {ticket_id!r}")
+        return {
+            "ticket_id": ticket_id,
+            "knowledge": self.workbench_knowledge(ticket_id),
+            "playbook": self.workbench_playbook(ticket_id),
+            "working_note": self.working_note_draft(ticket_id),
+        }
+
+    def _playbook_for_record(self, record: TicketResult) -> dict:
+        book = playbooks.playbook_for(record.category)
+        if book is None:
+            raise workbench.WorkbenchError(
+                f"no playbook authored for category '{record.category}' — "
+                "there are no steps to check off"
+            )
+        return book
+
+    def check_playbook_step(
+        self, ticket_id: str, step_id: str, *, actor: str, checked: bool = True
+    ) -> TicketResult:
+        """Check (or uncheck) one playbook step on the run's record.
+
+        Bookkeeping for the human: an append-only overlay entry.
+        The triage — status, composition, decision, calibration —
+        is untouched by construction: this method reads the record,
+        appends one entry, and saves it back.
+        """
+        from .schemas import PlaybookCheck
+
+        actor = self._require_actor(actor)
+        record = self.store.get(ticket_id)
+        if record is None:
+            raise KeyError(f"unknown ticket {ticket_id!r}")
+        book = self._playbook_for_record(record)
+        if step_id not in playbooks.step_ids(book):
+            raise workbench.WorkbenchError(
+                f"unknown playbook step {step_id!r} for category '{record.category}'"
+            )
+        if playbooks.active_na_mark(record) is not None:
+            raise workbench.WorkbenchConflict(
+                f"run {ticket_id}'s playbook is marked not-applicable — "
+                "lift the mark before checking steps"
+            )
+        view = playbooks.playbook_view(record)
+        state = next(s for s in view["steps"] if s["id"] == step_id)
+        if state["checked"] == checked:
+            raise workbench.WorkbenchConflict(
+                f"step {step_id} is already {'checked' if checked else 'unchecked'} "
+                f"on run {ticket_id}"
+            )
+        record.playbook_checks.append(
+            PlaybookCheck(
+                step_id=step_id,
+                action="checked" if checked else "unchecked",
+                by=actor,
+                at=format_timestamp(datetime.now(timezone.utc)),
+            )
+        )
+        self.store.save(record)
+        return record
+
+    def mark_playbook_na(self, ticket_id: str, *, actor: str, reason: str) -> TicketResult:
+        """Mark the run's playbook not-applicable, with the reason."""
+        from .schemas import PlaybookNaMark
+
+        actor = self._require_actor(actor)
+        reason = (reason or "").strip()
+        if not reason:
+            raise workbench.WorkbenchError(
+                "reason is required — a not-applicable mark states why the "
+                "playbook does not fit this ticket"
+            )
+        record = self.store.get(ticket_id)
+        if record is None:
+            raise KeyError(f"unknown ticket {ticket_id!r}")
+        self._playbook_for_record(record)
+        if playbooks.active_na_mark(record) is not None:
+            raise workbench.WorkbenchConflict(
+                f"run {ticket_id}'s playbook is already marked not-applicable"
+            )
+        record.playbook_na.append(
+            PlaybookNaMark(
+                action="marked",
+                by=actor,
+                reason=reason,
+                at=format_timestamp(datetime.now(timezone.utc)),
+            )
+        )
+        self.store.save(record)
+        return record
+
+    def lift_playbook_na(self, ticket_id: str, *, actor: str) -> TicketResult:
+        """Lift a not-applicable mark (the mark entry stays, audited)."""
+        from .schemas import PlaybookNaMark
+
+        actor = self._require_actor(actor)
+        record = self.store.get(ticket_id)
+        if record is None:
+            raise KeyError(f"unknown ticket {ticket_id!r}")
+        if playbooks.active_na_mark(record) is None:
+            raise workbench.WorkbenchConflict(
+                f"run {ticket_id}'s playbook has no not-applicable mark to lift"
+            )
+        record.playbook_na.append(
+            PlaybookNaMark(
+                action="lifted",
+                by=actor,
+                at=format_timestamp(datetime.now(timezone.utc)),
+            )
+        )
+        self.store.save(record)
+        return record
+
+    def save_working_note(self, ticket_id: str, *, text: str, actor: str) -> TicketResult:
+        """Save the agent's edited internal working note on the record.
+
+        The saved note is the agent's text under the agent's name;
+        saving replaces any earlier saved note (the export carries
+        the live one). The triage itself is untouched, exactly as
+        with the playbook overlay.
+        """
+        from .schemas import WorkingNote
+
+        actor = self._require_actor(actor)
+        text = (text or "").strip()
+        if not text:
+            raise workbench.WorkbenchError("the note text is empty — nothing to save")
+        record = self.store.get(ticket_id)
+        if record is None:
+            raise KeyError(f"unknown ticket {ticket_id!r}")
+        record.working_note = WorkingNote(
+            text=text,
+            saved_by=actor,
+            saved_at=format_timestamp(datetime.now(timezone.utc)),
+        )
         self.store.save(record)
         return record
 
