@@ -108,7 +108,7 @@ Or natively, offline, in about a minute:
 uv sync --extra dev        # or, without uv: make install-pip
 make demo                  # one ticket, traced end to end
 make test                  # 241 tests
-make evals                 # golden routing 58/58 · calibration gates pass
+make evals                 # golden routing 61/61 · calibration gates pass
 make serve                 # API + console on :8000
 ```
 
@@ -154,7 +154,7 @@ exists for tests and offline demos only. A deployment always sets
 
 Two packs, both deterministic offline:
 
-- **Golden routing set** (`evals/run_evals.py`) — 58 synthetic tickets
+- **Golden routing set** (`evals/run_evals.py`) — 61 synthetic tickets
   with authored category, queue, priority band, and safety flags —
   including the reopen cases (a reopened how_to that must not get a
   template draft, a floor-raised band, a chain that hits the reopen
@@ -166,8 +166,11 @@ Two packs, both deterministic offline:
   playbook actions and refusals, the note draft), and the QA-review
   cases (the sampler's exact draw on a seeded world, the agreement
   report's math with the withheld rate, and the records pinned
-  byte-identical across grading).
-  Gate: ≥ 95%. Current: **58/58**.
+  byte-identical across grading), and the dossier cases (a staged
+  customer history whose flags fire with exact evidence at triage
+  and in the dossier, a below-threshold customer with neither
+  flag, and a detach moving the ticket between thread rows).
+  Gate: ≥ 95%. Current: **61/61**.
 - **Calibration pack** (`evals/run_calibration.py`) — the headline
   eval for a decision system: reliability bins and Brier scores per
   question against the golden truths. Verify Briers ≤ 0.013, category
@@ -496,6 +499,57 @@ for the humans; the machinery's job is to make sure the
 conversation is about a fair sample. Reviewed runs carry their
 verdicts in the audit export's QA review block.
 
+## The customer dossier: the triage knows who is writing
+
+Everything above answers per-ticket. The agent holding a ticket
+asks a different question first — *have they written before, and
+how did it go?* The dossier (`dossier.py`) is that answer, computed
+in code from the stored records:
+
+- **One customer, one key** — the key the thread machinery already
+  trusts: the normalised sender email when intake carried one,
+  else the normalised sender name, else *unknown* — and unknown
+  customers have no dossier, because a dossier over "we don't know
+  who this is" would be a dossier over strangers. The limits are
+  stated on the dossier itself: two people sharing one inbox share
+  a dossier; one person writing from two addresses has two.
+- **Every ticket, honestly counted** — all their runs across
+  threads (under the *effective* grouping, so an operator's detach
+  moves the ticket here too), open vs decided vs reopened counts,
+  and the outcome history: resolved rate and median
+  intake-to-outcome hours, withheld below three outcomes with the
+  note saying why — the small-sample honesty the workbench uses.
+- **Two flags, defined once, evidence attached.** `repeat_issue` —
+  the same category decided 3+ times in 90 days; `frequent_contact`
+  — 5+ tickets in 30 days. Each flag carries the ticket ids and
+  the window, so the claim can be checked in one click. The
+  definitions live in `dossier.py` and nowhere else.
+- **The decision call sees the dossier — as counts, never text.**
+  At triage the service composes a compact history block from the
+  customer's *prior* records (counts, categories, flags, the last
+  outcome) and offers it through the decision port's `context`
+  argument, under the reopen idiom: fenced history for the
+  LLM/Jev adapters, a `context` field for Jev, accepted and
+  deliberately unused by the offline heuristics — and what
+  happened is recorded on the run (`history.context_use`). No
+  other ticket's subject or body ever enters the block: history
+  is code-composed arithmetic, so a prior ticket's words can
+  neither leak into a stranger's prompt nor smuggle instructions
+  into this one (pinned by test).
+- **Flags never change the answer.** History is context for the
+  model and the human; it never enters composition. The suite
+  pins it: a repeat customer's ticket composes *identically* to a
+  first-timer's given the same decision answers — priority and
+  routing stay the formula's.
+
+Surfaces: `GET /api/customers/dossier?key=…` and
+`GET /api/runs/{id}/dossier` (an unknown key is a 404, never an
+empty dossier), a dossier section in the console's run view, and
+the customer-history block in the audit export, beside the reopen
+context — the context the call was offered, auditable like every
+other input. Computing a dossier mutates nothing; the golden pack
+(G59–G61) pins it byte-pure.
+
 ## Batch, compare, similar tickets, SLA clocks, events, webhooks
 
 The operations surface around the pipeline:
@@ -598,6 +652,7 @@ src/support_triage/
   playbooks.py    authored category playbooks + the check-off overlay reads
   workbench.py    resolution knowledge, the working-note composer, refusals
   reviews.py      QA review: the seeded sampler, verdicts, agreement report
+  dossier.py      the customer dossier: history, flags, the context block
   compare.py      one ticket under several backends, diffed, unqueued
   sla.py          the deterministic SLA clock (band targets vs age)
   events.py       run events + the lifecycle bus behind /api/events

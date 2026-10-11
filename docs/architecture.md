@@ -501,6 +501,70 @@ verdicts are recorded. Storage follows the run-errors precedent
 InMemory doubles stay honest and the migration carries the
 production tables.
 
+## The customer dossier
+
+`dossier.py` is the per-customer read over everything the rounds
+above stored per-ticket. Three design points carry it.
+
+**The key is borrowed, not invented.** Customer identity was
+already decided by the thread machinery (`threads.customer_key`:
+normalised email, else `name:`-prefixed normalised name, else the
+empty key that groups with no one), and the correction layer
+already resolves a stored run's key from its stored intake
+(`service._customer_key_for`, since `TicketResult` deliberately
+carries no email). The dossier reuses both, so a customer is the
+same customer in every surface. The known failure modes are
+documented on the dossier itself rather than engineered away:
+shared inboxes merge histories, multiple addresses split them.
+That is the honest semantics of email-keyed support history, and
+pretending to resolve identity beyond it would be a claim the
+records cannot back.
+
+**The flags are definitions, not vibes.** `repeat_issue` and
+`frequent_contact` are computed over the records with thresholds
+and windows that live in `dossier.py` as named constants — the
+module docstring and the README state them, and each flag carries
+its ticket-id evidence. Windows anchor at the newest relevant
+stamp (the new ticket's own stamp at triage, the customer's
+latest at read time), so the same records always produce the
+same flags. Two asymmetries are deliberate: `repeat_issue`
+counts *decided* runs (the reviews population — the desk has
+actually ruled on them) in the record's triage category, while
+`frequent_contact` counts contacts of any status, because volume
+is a fact about contact, not about decisions. Records with no
+parseable intake stamp still count in totals but can never be
+window evidence.
+
+**The decision-call seam is the reopen seam.** The history block
+rides the port's existing `context` argument — the graph joins
+it after any reopen prior-context — so each backend treats it
+exactly as it treats reopen history: the LLM adapter fences it as
+`PRIOR HANDLING HISTORY`, Jev sends it as the request's `context`
+field, the offline heuristics accept and ignore it. What differs
+is the content discipline: the reopen context is one run's record,
+while the history block is *arithmetic over many records* —
+counts, categories, flag details, the last outcome — composed by
+`summarise_history` / `compose_history_block` with no slot a
+ticket's text could flow into. A test pins that a prior ticket's
+distinctive body phrases appear nowhere in a later prompt. The
+run records the summary plus `context_use` in
+`CustomerHistoryInfo`, parallel to `ReopenInfo`, and the audit
+export carries the same block. Finally, the composition firewall:
+`compose` reads the history dict only to *record* it. The golden
+composition-invariance test (identical canned answers for a
+first-timer and a flagged repeat customer → byte-identical
+composition and answers) is the property that keeps "context"
+from quietly becoming "input".
+
+The dossier view itself is a pure projection assembled from
+`all_records()` plus stored inputs — no new storage, no
+migration — grouping thread rows exactly as the thread views do
+(`threads.run_row` + the corrections overlay), so a detach is
+visible here the moment it lands. Its outcome figures reuse the
+workbench's `hours_from_intake` and its `KNOWLEDGE_MIN_SAMPLES`
+floor: one floor for "too few to quote", wherever the repo quotes
+a rate over outcomes.
+
 ## Events, comparisons, and SLA clocks
 
 **The event bus** (`events.py: EventBus`, owned by the service) is
