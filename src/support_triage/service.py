@@ -34,6 +34,13 @@ never to the graph directly. The service:
   port context under the reopen idiom; the history summary lands
   on the run's record, and the dossier read model serves the whole
   history per customer, flags and all, as a pure projection.
+- clusters incidents (incidents.py): computes cluster proposals
+  over the stored runs — many customers, one placement, one
+  window, shared words — and stores what a named lead does about
+  them: confirmations (an incident record whose membership is an
+  overlay that never writes to a member run's record), dismissals
+  (the member-set watermark), per-ticket addition decisions, and
+  closure, which leaves every member's own flow exactly as it was.
 """
 
 from __future__ import annotations
@@ -45,14 +52,18 @@ from datetime import datetime, timezone
 from langgraph.types import Command
 from pydantic import ValidationError
 
-from . import corrections, dossier, playbooks, threads, webhooks, workbench
+from . import corrections, dossier, incidents, playbooks, threads, webhooks, workbench
 from .composition import reopen_limit_in_force
 from .events import CollectingSink, EventBus, RunEvent
 from .graph import AgentRun, build_graph
 from .ports import Checkpointer, DecisionEngine, Embedder, EventSink, ObjectStore, Store, VectorIndex
 from .schemas import (
     AgentOutcome,
+    ClusterDismissal,
     DuplicateMark,
+    Incident,
+    IncidentDecline,
+    IncidentMember,
     ReviewSample,
     ReviewVerdict,
     ThreadCorrection,
@@ -1482,6 +1493,380 @@ class TriageService:
 
         return reviews.review_entries_for(ticket_id, self.store.all_review_verdicts())
 
+    # -- incident clustering (proposals, incidents, dismissals) -------------
+
+    def _incident_world(self) -> dict:
+        """Everything a clustering computation reads: the stored
+        runs, each run's ticket text (the same text the duplicate
+        check embeds), each run's customer key, and the stored
+        human acts (incidents, dismissals)."""
+        records = self.store.all_records()
+        return {
+            "records": records,
+            "texts": {
+                record.ticket_id: self._ticket_text(record.ticket_id, record)
+                for record in records
+            },
+            "customers": {
+                record.ticket_id: self._customer_key_for(record)
+                for record in records
+            },
+            "incidents": self.store.all_incidents(),
+            "dismissals": self.store.all_cluster_dismissals(),
+        }
+
+    def cluster_proposals(self) -> dict:
+        """The live cluster proposals (incidents.py): computed on
+        every read from the stored runs and human acts — a
+        proposal is a view, never a stored record, so it cannot
+        rot against a moving queue."""
+        world = self._incident_world()
+        payload = incidents.propose_clusters(
+            world["records"],
+            world["texts"],
+            world["customers"],
+            incidents=world["incidents"],
+            dismissals=world["dismissals"],
+        )
+        payload["open_incidents"] = sum(
+            1 for incident in world["incidents"] if incident.status == "open"
+        )
+        payload["dismissed_sets"] = len(world["dismissals"])
+        return payload
+
+    def confirm_cluster(
+        self, proposal_id: str, *, actor: str, title: str = ""
+    ) -> Incident:
+        """Confirm one live proposal into a stored incident.
+
+        The named lead's act creates the record; the proposal is
+        recomputed at confirmation, so what is confirmed is the
+        set as it stands now — a proposal id that no longer
+        computes (the queue moved) is a conflict, not a stale
+        yes. Membership lands on the incident record only; no
+        member run's record is opened for writing.
+        """
+        actor = (actor or "").strip()
+        if not actor:
+            raise incidents.IncidentError(
+                "actor is required — confirming an incident names the lead who owns it"
+            )
+        world = self._incident_world()
+        payload = incidents.propose_clusters(
+            world["records"],
+            world["texts"],
+            world["customers"],
+            incidents=world["incidents"],
+            dismissals=world["dismissals"],
+        )
+        proposal = next(
+            (p for p in payload["proposals"] if p["proposal_id"] == proposal_id),
+            None,
+        )
+        if proposal is None:
+            raise incidents.IncidentConflict(
+                f"proposal {proposal_id} no longer stands — the queue has "
+                "moved since it was computed; re-scan before confirming"
+            )
+        now = format_timestamp(datetime.now(timezone.utc))
+        incident_id = f"INC-{len(world['incidents']) + 1:04d}"
+        incident = Incident(
+            incident_id=incident_id,
+            title=(title or "").strip() or proposal["suggested_title"],
+            product_area=proposal["product_area"],
+            category=proposal["category"],
+            status="open",
+            anchor_ticket_id=proposal["anchor_ticket_id"],
+            proposal_id=proposal_id,
+            signals=proposal["signals"],
+            members=[
+                IncidentMember(
+                    ticket_id=member["ticket_id"],
+                    added_by=actor,
+                    added_at=now,
+                    origin="proposal",
+                )
+                for member in proposal["members"]
+            ],
+            opened_by=actor,
+            opened_at=now,
+        )
+        self.store.save_incident(incident)
+        self._publish(
+            "incident_opened",
+            "",
+            {
+                "incident_id": incident_id,
+                "members": len(incident.members),
+                "proposal_id": proposal_id,
+            },
+        )
+        return incident
+
+    def dismiss_cluster(
+        self, proposal_id: str, *, actor: str, reason: str
+    ) -> ClusterDismissal:
+        """Dismiss one live proposal, with the lead's reason.
+
+        The dismissal stores the proposal's member set: that exact
+        set never proposes again (the never-re-nag watermark),
+        while a set that gains a member is new evidence and may.
+        """
+        actor = (actor or "").strip()
+        reason = (reason or "").strip()
+        if not actor:
+            raise incidents.IncidentError(
+                "actor is required — a dismissal names who refused the grouping"
+            )
+        if not reason:
+            raise incidents.IncidentError(
+                "reason is required — a dismissal states why these tickets "
+                "are not one event"
+            )
+        world = self._incident_world()
+        payload = incidents.propose_clusters(
+            world["records"],
+            world["texts"],
+            world["customers"],
+            incidents=world["incidents"],
+            dismissals=world["dismissals"],
+        )
+        proposal = next(
+            (p for p in payload["proposals"] if p["proposal_id"] == proposal_id),
+            None,
+        )
+        if proposal is None:
+            raise incidents.IncidentConflict(
+                f"proposal {proposal_id} no longer stands — the queue has "
+                "moved since it was computed; there is nothing to dismiss"
+            )
+        dismissal = ClusterDismissal(
+            member_ticket_ids=sorted(
+                member["ticket_id"] for member in proposal["members"]
+            ),
+            product_area=proposal["product_area"],
+            category=proposal["category"],
+            dismissed_by=actor,
+            reason=reason,
+            dismissed_at=format_timestamp(datetime.now(timezone.utc)),
+        )
+        self.store.save_cluster_dismissal(dismissal)
+        self._publish(
+            "cluster_dismissed",
+            "",
+            {"proposal_id": proposal_id, "members": len(dismissal.member_ticket_ids)},
+        )
+        return dismissal
+
+    def _incident_or_raise(self, incident_id: str) -> Incident:
+        for incident in self.store.all_incidents():
+            if incident.incident_id == incident_id:
+                return incident
+        raise KeyError(f"unknown incident {incident_id!r}")
+
+    def list_incidents(self) -> list[dict]:
+        """Every incident (open first, then closed), as views with
+        their members read live from the runs."""
+        records = {r.ticket_id: r for r in self.store.all_records()}
+        views = [
+            incidents.incident_view(incident, records)
+            for incident in self.store.all_incidents()
+        ]
+        views.sort(
+            key=lambda view: (
+                view["incident"]["status"] != "open",
+                view["incident"]["incident_id"],
+            )
+        )
+        return views
+
+    def get_incident(self, incident_id: str) -> dict:
+        """One incident's page: the record, members read live,
+        and the addition candidates waiting on a lead."""
+        incident = self._incident_or_raise(incident_id)
+        records = {r.ticket_id: r for r in self.store.all_records()}
+        view = incidents.incident_view(incident, records)
+        view["addition_candidates"] = self.incident_additions(incident_id)
+        return view
+
+    def incident_additions(self, incident_id: str) -> list[dict]:
+        """The runs a lead may add to an open incident right now
+        (incidents.addition_candidates) — computed live, so a
+        ticket added or declined a moment ago is already settled."""
+        incident = self._incident_or_raise(incident_id)
+        world = self._incident_world()
+        return incidents.addition_candidates(
+            incident,
+            world["records"],
+            world["texts"],
+            incidents=world["incidents"],
+        )
+
+    def add_incident_member(
+        self, incident_id: str, ticket_id: str, *, actor: str
+    ) -> dict:
+        """Add one candidate run to an open incident, by name.
+
+        The ticket must be a live candidate — the same computation
+        the candidate list shows — so an add can never smuggle in
+        a ticket the rule did not offer; the refusal names why it
+        is not one. The membership appends to the incident record;
+        the run's own record is never opened for writing.
+        """
+        actor = (actor or "").strip()
+        if not actor:
+            raise incidents.IncidentError(
+                "actor is required — adding a member names the lead who added it"
+            )
+        incident = self._incident_or_raise(incident_id)
+        if incident.status != "open":
+            raise incidents.IncidentConflict(
+                f"incident {incident_id} is closed — a closed incident takes "
+                "no new members; a recurrence is a new cluster"
+            )
+        record = self.store.get(ticket_id)
+        if record is None:
+            raise KeyError(f"unknown ticket {ticket_id!r}")
+        world = self._incident_world()
+        reason = incidents.candidate_block_reason(
+            incident, record, world["records"], world["texts"], world["incidents"]
+        )
+        if reason is not None:
+            raise incidents.IncidentError(reason)
+        incident.members.append(
+            IncidentMember(
+                ticket_id=ticket_id,
+                added_by=actor,
+                added_at=format_timestamp(datetime.now(timezone.utc)),
+                origin="addition",
+            )
+        )
+        self.store.save_incident(incident)
+        self._publish(
+            "incident_member_added",
+            ticket_id,
+            {"incident_id": incident_id, "members": len(incident.members)},
+        )
+        return self.get_incident(incident_id)
+
+    def decline_incident_addition(
+        self, incident_id: str, ticket_id: str, *, actor: str, reason: str = ""
+    ) -> dict:
+        """Decline one addition candidate for an incident.
+
+        The decline is stored on the incident record: the ticket
+        is never offered for THIS incident again (the watermark),
+        and stays eligible everywhere else. Declining a ticket
+        that is not a live candidate is refused with the reason —
+        there is nothing to decline."""
+        actor = (actor or "").strip()
+        if not actor:
+            raise incidents.IncidentError(
+                "actor is required — a decline names the lead who made it"
+            )
+        incident = self._incident_or_raise(incident_id)
+        if incident.status != "open":
+            raise incidents.IncidentConflict(
+                f"incident {incident_id} is closed — its candidate list is settled"
+            )
+        record = self.store.get(ticket_id)
+        if record is None:
+            raise KeyError(f"unknown ticket {ticket_id!r}")
+        world = self._incident_world()
+        block = incidents.candidate_block_reason(
+            incident, record, world["records"], world["texts"], world["incidents"]
+        )
+        if block is not None:
+            raise incidents.IncidentError(block)
+        incident.declined.append(
+            IncidentDecline(
+                ticket_id=ticket_id,
+                by=actor,
+                reason=(reason or "").strip(),
+                at=format_timestamp(datetime.now(timezone.utc)),
+            )
+        )
+        self.store.save_incident(incident)
+        self._publish(
+            "incident_addition_declined",
+            ticket_id,
+            {"incident_id": incident_id},
+        )
+        return self.get_incident(incident_id)
+
+    def close_incident(
+        self, incident_id: str, *, actor: str, reason: str
+    ) -> Incident:
+        """Close an incident: a named act about the incident only.
+
+        No member run is decided, closed, re-routed or otherwise
+        touched — each member's outcome remains its own flow's
+        business, and the record says so. A closed incident takes
+        no new members and proposes nothing; its members become
+        eligible evidence for future clusters again.
+        """
+        actor = (actor or "").strip()
+        reason = (reason or "").strip()
+        if not actor:
+            raise incidents.IncidentError(
+                "actor is required — closing an incident names its lead"
+            )
+        if not reason:
+            raise incidents.IncidentError(
+                "reason is required — a closure states its basis (fixed "
+                "upstream, duplicate of another incident, not an event)"
+            )
+        incident = self._incident_or_raise(incident_id)
+        if incident.status == "closed":
+            raise incidents.IncidentConflict(
+                f"incident {incident_id} is already closed "
+                f"(by {incident.closed_by}: {incident.close_reason})"
+            )
+        now = format_timestamp(datetime.now(timezone.utc))
+        incident.status = "closed"
+        incident.closed_by = actor
+        incident.closed_at = now
+        incident.close_reason = reason
+        self.store.save_incident(incident)
+        self._publish(
+            "incident_closed",
+            "",
+            {"incident_id": incident_id, "members": len(incident.members)},
+        )
+        return incident
+
+    def incidents_for_run(self, ticket_id: str) -> list[dict]:
+        """Every incident membership of one run (incidents.py) —
+        the badge and the context line's source."""
+        return incidents.memberships_for(ticket_id, self.store.all_incidents())
+
+    def run_view(self, ticket_id: str) -> dict | None:
+        """One run as the agent-facing surfaces serve it: the
+        stored record, untouched, plus its incident annotation —
+        the memberships and, when one is open, the context line.
+        The annotation is computed at read time from the incident
+        records; it is never written onto the record."""
+        record = self.store.get(ticket_id)
+        if record is None:
+            return None
+        payload = record.model_dump()
+        memberships = self.incidents_for_run(ticket_id)
+        payload["incidents"] = memberships
+        open_lines = [
+            entry["context_line"] for entry in memberships if entry["status"] == "open"
+        ]
+        payload["incident_context"] = open_lines[0] if open_lines else ""
+        return payload
+
+    def incident_block_for(self, ticket_id: str) -> dict | None:
+        """The audit export's incident block for one run: its
+        memberships, or None when it belongs to no incident (the
+        export is then exactly what it was before incidents)."""
+        memberships = self.incidents_for_run(ticket_id)
+        if not memberships:
+            return None
+        return {"memberships": memberships}
+
     # -- policy replay + audit export (reads over the records) --------------
 
     def policy_replay(
@@ -1552,6 +1937,7 @@ class TriageService:
             template_stats=template_effectiveness.template_stats_for_run(
                 report, record
             ),
+            incident=self.incident_block_for(ticket_id),
         )
 
     # -- reads --------------------------------------------------------------
@@ -1560,7 +1946,24 @@ class TriageService:
         return self.store.get(ticket_id)
 
     def queue(self, filters: dict | None = None) -> list[dict]:
-        return self.store.queue_summary(filters)
+        rows = self.store.queue_summary(filters)
+        # The incident badge (incidents.py): membership of an OPEN
+        # incident, joined at read time from the incident records —
+        # the queue row says "this ticket is part of that event"
+        # without the run's record carrying anything about it.
+        open_badges: dict[str, dict] = {}
+        for incident in self.store.all_incidents():
+            if incident.status != "open":
+                continue
+            for member in incident.members:
+                open_badges[member.ticket_id] = {
+                    "incident_id": incident.incident_id,
+                    "title": incident.title,
+                    "member_count": len(incident.members),
+                }
+        for row in rows:
+            row["incident"] = open_badges.get(row["ticket_id"])
+        return rows
 
     def metrics(self) -> dict:
         return self.store.metrics()

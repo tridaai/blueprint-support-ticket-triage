@@ -352,6 +352,97 @@ class ReviewVerdict(BaseModel):
     recorded_at: str = ""  # ISO datetime, stamped by the service
 
 
+class IncidentMember(BaseModel):
+    """One run's membership of an incident (incidents.py).
+
+    Membership lives on the INCIDENT's record, never on the run's:
+    the member run's ``TicketResult`` is byte-identical whether or
+    not it belongs to an incident, exactly as a QA verdict lives
+    with its sample and never on the graded run. ``origin`` says
+    how the run joined: ``proposal`` (it was in the cluster a lead
+    confirmed) or ``addition`` (it arrived later and a lead added
+    it from the incident's candidate list).
+    """
+
+    ticket_id: str = ""
+    added_by: str = ""  # the lead who confirmed / added it
+    added_at: str = ""  # ISO datetime, stamped by the service
+    origin: str = ""  # proposal | addition
+
+
+class IncidentDecline(BaseModel):
+    """A lead's refusal of one addition candidate for an incident.
+
+    Append-only on the incident record: a declined ticket is never
+    proposed as an addition to THIS incident again (the watermark
+    discipline — a grouping a human refused does not re-nag), while
+    remaining fully eligible for any other incident or cluster.
+    """
+
+    ticket_id: str = ""
+    by: str = ""
+    reason: str = ""
+    at: str = ""  # ISO datetime, stamped by the service
+
+
+class Incident(BaseModel):
+    """One confirmed incident: many customers, one underlying event.
+
+    A cluster proposal (incidents.py) is a computed view; THIS is
+    the stored record a named lead creates by confirming one. The
+    incident is a lens and a working list over its member runs —
+    it merges nothing, re-routes nothing, and closing it is a
+    named act that leaves every member's own status, decision and
+    outcome exactly where its own flow put them. ``signals``
+    carries the proposal's evidence as it stood at confirmation,
+    so what the lead saw when they said "yes, one event" stays on
+    the record after the queue has moved on.
+    """
+
+    incident_id: str
+    title: str = ""  # composed in code at proposal time; a lead may rename at confirmation
+    product_area: str = ""
+    category: str = ""
+    status: str = "open"  # open | closed
+    anchor_ticket_id: str = ""  # the earliest member — the text additions are matched against
+    proposal_id: str = ""  # the deterministic fingerprint of the confirmed proposal
+    signals: dict = Field(default_factory=dict)
+    members: list[IncidentMember] = Field(default_factory=list)
+    declined: list[IncidentDecline] = Field(default_factory=list)
+    opened_by: str = ""
+    opened_at: str = ""  # ISO datetime, stamped by the service
+    closed_by: str = ""
+    closed_at: str = ""
+    close_reason: str = ""
+
+    def member_ids(self) -> list[str]:
+        return [member.ticket_id for member in self.members]
+
+
+class ClusterDismissal(BaseModel):
+    """A lead's dismissal of one cluster proposal, with the reason.
+
+    The never-re-nag watermark: a proposal whose member set is
+    exactly a dismissed set is suppressed on every later scan. A
+    set that GAINS a member is a different set and may propose
+    again — growth is new evidence, and the new proposal names the
+    dismissal it outgrew. Dismissals live in their own store
+    records, like incidents: they are human acts, and human acts
+    are stored, audited, and never recomputed away.
+    """
+
+    member_ticket_ids: list[str] = Field(default_factory=list)  # sorted
+    product_area: str = ""
+    category: str = ""
+    dismissed_by: str = ""
+    reason: str = ""
+    dismissed_at: str = ""  # ISO datetime, stamped by the service
+
+    @property
+    def member_set(self) -> frozenset:
+        return frozenset(self.member_ticket_ids)
+
+
 class RunTelemetry(BaseModel):
     backend: str = ""
     model: str = ""

@@ -91,6 +91,35 @@ class StoreBase:
             for verdict in self.__dict__.get("_review_verdicts", [])
         ]
 
+    # -- incident records (incidents.py) ----------------------------------
+    # Incidents and cluster dismissals are stored records of their
+    # own — the human acts over the computed proposals. Membership
+    # lives here, never on a run's record (a member's triage stays
+    # byte-identical). Same arrangement as the review records:
+    # process-local defaults for the doubles, PostgresStore
+    # persists them in the incident tables (migration 0005).
+
+    def save_incident(self, incident) -> None:
+        log = self.__dict__.setdefault("_incidents", {})
+        log[incident.incident_id] = incident.model_copy(deep=True)
+
+    def all_incidents(self) -> list:
+        return [
+            incident.model_copy(deep=True)
+            for incident in self.__dict__.get("_incidents", {}).values()
+        ]
+
+    def save_cluster_dismissal(self, dismissal) -> None:
+        self.__dict__.setdefault("_cluster_dismissals", []).append(
+            dismissal.model_copy(deep=True)
+        )
+
+    def all_cluster_dismissals(self) -> list:
+        return [
+            dismissal.model_copy(deep=True)
+            for dismissal in self.__dict__.get("_cluster_dismissals", [])
+        ]
+
     def queue_summary(
         self, filters: dict | None = None, now: datetime | None = None
     ) -> list[dict]:
@@ -365,6 +394,54 @@ class PostgresStore(StoreBase):
                 cur.execute("SELECT payload FROM review_verdicts ORDER BY id")
                 rows = cur.fetchall()
         return [ReviewVerdict.model_validate(row[0]) for row in rows]
+
+    # -- incident records: persisted in their own tables (0005) -----------
+
+    def save_incident(self, incident) -> None:
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO incidents (incident_id, payload)
+                    VALUES (%s, %s::jsonb)
+                    ON CONFLICT (incident_id) DO UPDATE SET payload = EXCLUDED.payload
+                    """,
+                    (incident.incident_id, json.dumps(incident.model_dump())),
+                )
+            conn.commit()
+
+    def all_incidents(self) -> list:
+        from .schemas import Incident
+
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT payload FROM incidents ORDER BY incident_id")
+                rows = cur.fetchall()
+        return [Incident.model_validate(row[0]) for row in rows]
+
+    def save_cluster_dismissal(self, dismissal) -> None:
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO cluster_dismissals (fingerprint, payload)
+                    VALUES (%s, %s::jsonb)
+                    """,
+                    (
+                        ",".join(dismissal.member_ticket_ids),
+                        json.dumps(dismissal.model_dump()),
+                    ),
+                )
+            conn.commit()
+
+    def all_cluster_dismissals(self) -> list:
+        from .schemas import ClusterDismissal
+
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT payload FROM cluster_dismissals ORDER BY id")
+                rows = cur.fetchall()
+        return [ClusterDismissal.model_validate(row[0]) for row in rows]
 
     def get(self, ticket_id: str) -> TicketResult | None:
         with self._connect() as conn:
