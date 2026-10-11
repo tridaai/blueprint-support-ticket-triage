@@ -143,6 +143,49 @@ does, or doesn't.
   backend reports them, guardrail outcomes. `/metrics` aggregates
   across records for the queue-level view.
 
+## Stats, outcomes, and live calibration
+
+The dashboards layer is deliberately boring: pure aggregation
+functions (`stats.py`) over the store's record list, so PostgreSQL
+and the in-memory double produce identical dashboards from identical
+records. Failed runs are the one gap in the record list — an
+exception leaves no record — so the store keeps a small append-only
+error log (process-local for the doubles, the `run_errors` table in
+PostgreSQL) and the service writes to it on the failure path, after
+emitting the `run_failed` event and before re-raising. Telemetry
+failure never masks the run's real error.
+
+An agent's decision at the gate says "I accept this triage"; an
+**outcome** says "here is what was actually true". Outcomes are a
+separate, later write (`POST /api/runs/{id}/outcome`) because they
+are only knowable after the work: final category and queue, whether
+it resolved, and per-question truth for the questions an agent can
+judge. They are stored on the record (and promoted to a column by
+migration 0003) and never feed back into the triage itself — the
+pipeline's record of what it believed stays untouched, which is
+what makes scoring it honest.
+
+Live calibration (`livecal.py`) converts outcome-carrying records
+into the eval runner's sample shape and calls the same
+`calibration_report`: category scored one-vs-rest on the chosen
+value through the confidence bins (plus multiclass Brier over the
+full distribution), verify questions as binary Brier + reliability
+bins, score questions through the high-event (≥ 7) Brier and
+expected-score MAE. Eval and live figures are therefore directly
+comparable — same bins, same code, different truths: authored
+golden labels before launch, the operation's own outcomes after.
+The endpoint reports `available: false` with an explanatory note
+until the first outcome exists; a dashboard that invented a live
+figure from no labels would be lying in exactly the way this
+blueprint exists to avoid.
+
+The policy endpoint (`GET /api/policy`) is the composition module's
+constants rendered as data — one source of truth, read by the
+console's policy panel and what-if simulator. The simulator runs
+client-side over fetched records and persists nothing: it answers
+"what would this threshold do to today's queue?" without giving a
+hypothetical the power to touch a real record.
+
 ## What the agent will never do
 
 - **Send anything to a customer.** No node in the graph has that

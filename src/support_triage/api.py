@@ -12,6 +12,12 @@ every route delegates, none re-implements. Notable behaviour:
   with the translated error, never a half-record;
 - ``POST /tickets/{id}/decision`` records approve/reject (and an
   optional assignee) — the ONLY way a run leaves ``awaiting_agent``;
+- the dashboards layer: ``GET /api/stats/overview|performance|
+  calibration`` aggregate the stored runs (live calibration scores
+  recorded probabilities against agent outcomes), ``GET /api/policy``
+  renders the composition config as data, ``GET /queue`` filters and
+  searches server-side, and ``POST /api/runs/{id}/outcome`` records
+  the agent's ground truth for a handled ticket;
 - ``/readiness`` fails (503) when PostgreSQL is configured but
   unreachable, and says honestly when the in-memory test doubles are
   in use (records lost on restart — fine for a look, not for work).

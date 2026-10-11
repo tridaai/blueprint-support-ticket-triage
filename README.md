@@ -167,6 +167,57 @@ Two packs, both deterministic offline:
 Both packs write `evals/results.json` / `evals/calibration_results.json`
 (and the packaged copies the console reads).
 
+## Dashboards and the outcome loop
+
+The console has a second view — **Dashboards** — fed by aggregate
+endpoints over the run store (the same aggregation code serves
+PostgreSQL and the test doubles, so the numbers are the numbers):
+
+- `GET /api/stats/overview` — counts by status, queue and category;
+  the priority-band spread; safety-flag counts; guardrail failures
+  by check; and the three rates that matter (low-confidence forcing,
+  template drafts offered, autonomy recommended — never acted on).
+- `GET /api/stats/performance` — per decision backend: runs and
+  decision calls, decision-latency mean / p50 / p95, token totals
+  and estimated cost, and failed-run counts from the store's error
+  log (a failed run leaves no record; it still gets counted).
+- `GET /api/stats/calibration` — the eval pack's calibration next to
+  **live calibration** (below), in one payload.
+- `GET /api/policy` — the composition config as data: priority
+  weights, band floors, the routing matrix with refinements and
+  override precedence, guardrail thresholds, the autonomy bar.
+
+Panels render queue health, automation & guardrails, backend
+performance, and calibration as plain CSS bars — no chart library.
+The **policy what-if** panel recomputes the open queue in the
+browser under a hypothetical confidence threshold and/or outage
+boost and reports how many tickets would change queue, band, or
+flip to human review. It is a simulation: nothing is persisted.
+
+The queue itself gained filters (`queue`, `status`, `priority_band`,
+`flag`, `backend`, plus `q` text search over subject and sender) in
+the API and the console.
+
+**The outcome loop** is what turns the dashboards from reporting
+into measurement. After handling a ticket, the agent records the
+ground truth:
+
+```
+POST /api/runs/{ticket_id}/outcome
+{"final_category": "billing", "final_queue": "billing_support",
+ "resolved": true, "by": "agent-9",
+ "verify_truth": {"was_pii": false}, "score_truth": {"urgency": 8}}
+```
+
+Truth keys accept agent-facing aliases (`was_pii`, `was_outage`) or
+question keys; unknown keys are a 422, never silently dropped. The
+outcome rides on the record (migration `0003` also promotes it to a
+column). Live calibration then scores the recorded probabilities
+against those outcomes with the *same* binning and Brier code as the
+eval pack (`calibration.py`), and reports category/queue accuracy
+and resolution rate alongside. With no outcomes recorded, the panel
+says exactly that — there is no synthetic stand-in for ground truth.
+
 ## Honest status
 
 - **Jev is early access.** The adapter is written to TypeSafe's
@@ -201,14 +252,16 @@ src/support_triage/
   screening.py    prompt-injection screen for untrusted ticket text
   embeddings.py   embedders + vector index (duplicate check)
   calibration.py  reliability bins + Brier math for the eval pack
+  livecal.py      agent outcomes -> live calibration (same math)
+  stats.py        overview + per-backend performance aggregates
   store.py        records: PostgresStore / InMemoryStore (double)
   objectstore.py  S3 payloads (stdlib SigV4) / in-memory double
   migrations.py   numbered SQL migration runner
   checkpoints.py  LangGraph saver selection (Postgres / memory)
   api.py          FastAPI transport; demo.py / cli.py the other surfaces
 evals/            golden.jsonl + the two runners
-migrations/       0001 records · 0002 pgvector embeddings
-tests/            94 tests, hermetic
+migrations/       0001 records · 0002 pgvector embeddings · 0003 outcomes + run errors
+tests/            the hermetic suite (pytest)
 ```
 
 ## Extension seams
