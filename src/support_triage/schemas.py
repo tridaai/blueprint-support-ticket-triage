@@ -127,6 +127,7 @@ class TicketResult(BaseModel):
     subject: str = ""
     sender_name: str = ""
     channel: str = ""
+    received_at: str = ""  # the ticket's intake timestamp — the SLA clock's start
     category: str = ""
     product_area: str = ""
     answers: list[QuestionAnswer] = Field(default_factory=list)

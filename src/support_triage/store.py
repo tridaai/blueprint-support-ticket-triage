@@ -23,9 +23,11 @@ from __future__ import annotations
 
 import json
 import threading
+from datetime import datetime
 
 from .config import env_str, load_dotenv
 from .schemas import TicketInput, TicketResult
+from .sla import sla_clock
 
 OPEN_STATUSES = ("awaiting_agent",)
 
@@ -61,7 +63,9 @@ class StoreBase:
     def all_errors(self) -> list[dict]:
         return [dict(e) for e in self.__dict__.get("_error_log", [])]
 
-    def queue_summary(self, filters: dict | None = None) -> list[dict]:
+    def queue_summary(
+        self, filters: dict | None = None, now: datetime | None = None
+    ) -> list[dict]:
         """Ticket rows for the console queue, highest priority first.
 
         Unfiltered, this is the open queue (round-1 behaviour: only
@@ -70,6 +74,14 @@ class StoreBase:
         must be raised), ``backend`` and ``q`` (case-insensitive text
         over subject and sender); naming a ``status`` searches across
         decided tickets too.
+
+        Every row also carries the deterministic SLA clock (sla.py)
+        for open tickets: ``sla_state`` (ok | due_soon | breached),
+        ``sla_target_hours``, ``age_seconds`` and
+        ``seconds_to_breach`` — all ``None`` when the clock isn't
+        running (decided ticket, or no parseable received_at). The
+        sort order is unchanged: priority score, highest first;
+        ``now`` is injectable so tests never race the wall clock.
         """
         filters = filters or {}
         records = list(self.all_records())
@@ -99,31 +111,40 @@ class StoreBase:
                 if needle in r.subject.lower() or needle in r.sender_name.lower()
             ]
         records.sort(key=lambda r: r.composition.priority_score, reverse=True)
-        return [
-            {
-                "ticket_id": r.ticket_id,
-                "subject": r.subject,
-                "sender_name": r.sender_name,
-                "channel": r.channel,
-                "category": r.category,
-                "product_area": r.product_area,
-                "priority_score": r.composition.priority_score,
-                "priority_band": r.composition.priority_band,
-                "queue": r.composition.queue,
-                "status": r.status,
-                "backend": r.telemetry.backend if r.telemetry else "",
-                "flags": dict(r.composition.flags),
-                "decision_confidence": round(
-                    max((a.confidence for a in r.answers), default=0.0), 3
-                ),
-                "category_confidence": round(
-                    next((a.confidence for a in r.answers if a.key == "category"), 0.0), 3
-                ),
-                "requires_human_review": r.guardrails.requires_human_review,
-                "is_duplicate": r.duplicate.is_duplicate,
-            }
-            for r in records
-        ]
+        rows = []
+        for r in records:
+            clock = sla_clock(r, now)
+            rows.append(
+                {
+                    "ticket_id": r.ticket_id,
+                    "subject": r.subject,
+                    "sender_name": r.sender_name,
+                    "channel": r.channel,
+                    "received_at": r.received_at,
+                    "category": r.category,
+                    "product_area": r.product_area,
+                    "priority_score": r.composition.priority_score,
+                    "priority_band": r.composition.priority_band,
+                    "queue": r.composition.queue,
+                    "status": r.status,
+                    "backend": r.telemetry.backend if r.telemetry else "",
+                    "flags": dict(r.composition.flags),
+                    "decision_confidence": round(
+                        max((a.confidence for a in r.answers), default=0.0), 3
+                    ),
+                    "category_confidence": round(
+                        next((a.confidence for a in r.answers if a.key == "category"), 0.0), 3
+                    ),
+                    "requires_human_review": r.guardrails.requires_human_review,
+                    "is_duplicate": r.duplicate.is_duplicate,
+                    "sla_state": clock["state"] if clock else None,
+                    "sla_target_hours": clock["target_hours"] if clock else None,
+                    "age_seconds": clock["age_seconds"] if clock else None,
+                    "seconds_to_breach": clock["seconds_to_breach"] if clock else None,
+                    "sla_due_at": clock["due_at"] if clock else None,
+                }
+            )
+        return rows
 
     def metrics(self) -> dict:
         records = self.all_records()

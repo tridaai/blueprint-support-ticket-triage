@@ -44,6 +44,18 @@ FLAG_THRESHOLD = 0.5  # a verify answer counts as "raised" at this probability
 BANDS = ((80.0, "critical"), (55.0, "high"), (30.0, "medium"), (0.0, "low"))
 
 
+# --- SLA clock targets ----------------------------------------------------
+# Deterministic response/resolution targets per priority band, in
+# hours, read by the SLA clock (sla.py). These are NOT the model's
+# sla_breach_risk answer: that is a judgement (a distribution over a
+# rubric) that feeds the priority formula above. The clock is plain
+# arithmetic over the ticket's age — the two never mix.
+SLA_TARGET_HOURS = {"critical": 1.0, "high": 4.0, "medium": 24.0, "low": 72.0}
+# A ticket is "due soon" once its remaining time falls to this
+# fraction of its target (the last quarter of the clock).
+SLA_DUE_SOON_FRACTION = 0.25
+
+
 def priority_band(score: float) -> str:
     for floor, name in BANDS:
         if score >= floor:
@@ -281,5 +293,13 @@ def policy_snapshot() -> dict:
             "auto_resolvable_categories": sorted(AUTO_RESOLVABLE_CATEGORIES),
             "min_category_confidence": AUTO_MIN_CATEGORY_CONFIDENCE,
             "note": "advisory only — computed on every run, never acted on",
+        },
+        "sla": {
+            "target_hours": dict(SLA_TARGET_HOURS),
+            "due_soon_fraction": SLA_DUE_SOON_FRACTION,
+            "note": (
+                "deterministic clock targets per priority band (sla.py); "
+                "distinct from the model's sla_breach_risk judgement"
+            ),
         },
     }

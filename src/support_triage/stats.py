@@ -21,8 +21,11 @@ state; it counts what the pipeline already recorded:
 
 from __future__ import annotations
 
+from datetime import datetime
+
 from .composition import BANDS
 from .schemas import TicketResult
+from .sla import sla_clock
 
 SAFETY_FLAG_KEYS = (
     "contains_pii",
@@ -61,8 +64,14 @@ def _rate(count: int, total: int) -> dict:
     return {"count": count, "rate": round(count / total, 4) if total else 0.0}
 
 
-def overview_stats(records: list[TicketResult]) -> dict:
-    """Queue health + automation posture over every stored run."""
+def overview_stats(records: list[TicketResult], now: datetime | None = None) -> dict:
+    """Queue health + automation posture over every stored run.
+
+    The ``sla`` block counts the deterministic SLA clock (sla.py)
+    over open tickets whose clock is running — breached and due-soon
+    are the two numbers a queue lead watches. ``now`` is injectable
+    for tests; the API passes nothing and gets the wall clock.
+    """
     total = len(records)
     bands = {name: 0 for name in BAND_ORDER}
     for record in records:
@@ -82,12 +91,19 @@ def overview_stats(records: list[TicketResult]) -> dict:
                 name = str(check.get("name", "unknown"))
                 guardrail_failures[name] = guardrail_failures.get(name, 0) + 1
 
+    sla_counts = {"breached": 0, "due_soon": 0, "ok": 0}
+    for record in records:
+        clock = sla_clock(record, now)
+        if clock is not None:
+            sla_counts[clock["state"]] += 1
+
     return {
         "total_runs": total,
         "by_status": _count_by(records, lambda r: r.status),
         "by_queue": _count_by(records, lambda r: r.composition.queue),
         "by_category": _count_by(records, lambda r: r.category),
         "priority_bands": bands,
+        "sla": sla_counts,
         "safety_flags": flags,
         "guardrail_failures": dict(sorted(guardrail_failures.items())),
         "rates": {

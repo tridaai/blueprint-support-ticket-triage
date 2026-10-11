@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any, Optional, TypedDict
 
 from langgraph.graph import END, START, StateGraph
@@ -44,6 +45,7 @@ from .decisions import DecisionSet
 from .events import NullSink, RunEvent
 from .ports import DecisionEngine, Embedder, EventSink, VectorIndex
 from .questions import triage_questions
+from .sla import format_timestamp
 from .schemas import (
     AutonomyInfo,
     CompositionInfo,
@@ -272,12 +274,16 @@ def build_graph(
             output_tokens=usage.get("output_tokens"),
             estimated_cost_usd=usage.get("estimated_cost_usd"),
         )
+        received_at = ticket.received_at or format_timestamp(
+            datetime.fromtimestamp(state.get("started_at", time.time()), timezone.utc)
+        )
         result = TicketResult(
             ticket_id=ticket.ticket_id,
             status="awaiting_agent",
             subject=ticket.subject,
             sender_name=ticket.sender_name,
             channel=ticket.channel,
+            received_at=received_at,
             category=decisions.choice("category"),
             product_area=decisions.choice("product_area"),
             answers=[
