@@ -462,6 +462,68 @@ class TriageService:
             raise KeyError(f"unknown ticket {ticket_id!r}")
         return suggest_assignment(record, self.store.all_records(), load_roster())
 
+    # -- policy replay + audit export (reads over the records) --------------
+
+    def policy_replay(
+        self,
+        *,
+        category_min_confidence: float | None = None,
+        weights: dict | None = None,
+        outage_boost: bool | None = None,
+    ) -> dict:
+        """What a hypothetical policy would have done to history
+        (replay.py): the stored answers re-composed in code, the
+        moved runs reported. No backend is called and nothing is
+        written — validation errors raise ``ValueError``."""
+        from .replay import replay_policy, validate_hypothetical
+
+        hypothetical = validate_hypothetical(
+            category_min_confidence=category_min_confidence,
+            weights=weights,
+            outage_boost=outage_boost,
+        )
+        return replay_policy(self.store.all_records(), hypothetical)
+
+    def export_run(self, ticket_id: str, eval_per_question: dict | None = None) -> dict:
+        """One run as a portable audit document (exports.py).
+
+        Composed from the stored record at read time; the drift
+        section carries the watch's current verdict on the questions
+        this run answered (``eval_per_question`` is the eval pack's
+        baseline, exactly as for the drift endpoint — without it the
+        section says so rather than guessing).
+        """
+        from .drift import drift_report
+        from .exports import build_export
+        from .sla import sla_clock
+
+        record = self.store.get(ticket_id)
+        if record is None:
+            raise KeyError(f"unknown ticket {ticket_id!r}")
+        report = drift_report(self.store.all_records(), eval_per_question)
+        questions: dict = {}
+        flagged: list[str] = []
+        for answer in record.answers:
+            row = report["questions"].get(answer.key)
+            if row is None:
+                continue
+            questions[answer.key] = row
+            if row.get("drift"):
+                flagged.append(answer.key)
+        drift = {
+            "note": report["note"],
+            "any_drift": report["any_drift"],
+            "flagged_questions": flagged,
+            "questions": questions,
+        }
+        return build_export(
+            record,
+            exported_at=format_timestamp(datetime.now(timezone.utc)),
+            ticket_input=self.store.get_input(ticket_id),
+            sla=sla_clock(record),
+            drift=drift,
+        )
+
     # -- reads --------------------------------------------------------------
 
     def get_record(self, ticket_id: str) -> TicketResult | None:

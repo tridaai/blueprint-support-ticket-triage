@@ -107,6 +107,10 @@ class Composition:
     routing_reason: str
     override: str = ""  # "" | legal | outage | engineering
     flags: dict[str, bool] = field(default_factory=dict)  # verify key -> raised?
+    # The weights this composition was actually scored under — the
+    # module constants for a live run, a hypothetical set for a replay
+    # (replay.py). Recorded on the run either way.
+    weights: dict[str, float] = field(default_factory=lambda: dict(PRIORITY_WEIGHTS))
 
     def as_dict(self) -> dict:
         return {
@@ -118,29 +122,45 @@ class Composition:
             "routing_reason": self.routing_reason,
             "override": self.override,
             "flags": self.flags,
-            "weights": PRIORITY_WEIGHTS,
+            "weights": self.weights,
         }
 
 
-def compose(decisions: DecisionSet) -> Composition:
-    """Priority + routing for one validated decision set."""
+def compose(
+    decisions: DecisionSet,
+    *,
+    weights: dict[str, float] | None = None,
+    outage_boost: float | None = None,
+) -> Composition:
+    """Priority + routing for one validated decision set.
+
+    ``weights`` / ``outage_boost`` override the module policy for
+    this call only (the impact replay, replay.py); the defaults are
+    the live policy and every existing caller passes neither.
+    """
+    effective_weights = dict(weights) if weights is not None else PRIORITY_WEIGHTS
+    boost_points = OUTAGE_BOOST if outage_boost is None else outage_boost
     urgency = decisions.score("urgency") / 10.0
     sla = decisions.score("sla_breach_risk") / 10.0
     churn = decisions.score("churn_risk") / 10.0
     anger = (10.0 - decisions.score("sentiment")) / 10.0
     abuse = decisions.probability("is_abusive")
 
+    term_values = {
+        "urgency": urgency,
+        "sla_breach_risk": sla,
+        "churn_risk": churn,
+        "anger": anger,
+        "abuse": abuse,
+    }
     contributions = {
-        "urgency": round(PRIORITY_WEIGHTS["urgency"] * urgency * 100, 2),
-        "sla_breach_risk": round(PRIORITY_WEIGHTS["sla_breach_risk"] * sla * 100, 2),
-        "churn_risk": round(PRIORITY_WEIGHTS["churn_risk"] * churn * 100, 2),
-        "anger": round(PRIORITY_WEIGHTS["anger"] * anger * 100, 2),
-        "abuse": round(PRIORITY_WEIGHTS["abuse"] * abuse * 100, 2),
+        term: round(effective_weights[term] * term_values[term] * 100, 2)
+        for term in PRIORITY_WEIGHTS  # canonical term order
     }
     score = sum(contributions.values())
     outage = decisions.probability("is_outage_report") >= FLAG_THRESHOLD
     if outage:
-        score = min(100.0, score + OUTAGE_BOOST)
+        score = min(100.0, score + boost_points)
     score = round(score, 1)
 
     flags = {
@@ -178,6 +198,7 @@ def compose(decisions: DecisionSet) -> Composition:
         routing_reason=reason,
         override=override,
         flags=flags,
+        weights=dict(effective_weights),
     )
 
 

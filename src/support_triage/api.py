@@ -30,6 +30,12 @@ every route delegates, none re-implements. Notable behaviour:
   eval baseline (drift flags only past a sample floor), and ``GET
   /api/runs/{id}/assignment`` suggests an assignee from the roster
   with its reasons printed — advisory only, it assigns nothing;
+- the round-5 policy + audit layer: ``POST /api/policy/replay``
+  replays a hypothetical policy (threshold, weights, outage boost)
+  over every stored run's recorded answers — no backend call,
+  nothing written — and ``GET /api/runs/{id}/export`` renders one
+  run as a portable audit document (JSON, or plain text with
+  ``?format=text``);
 - ``/readiness`` fails (503) when PostgreSQL is configured but
   unreachable, and says honestly when the in-memory test doubles are
   in use (records lost on restart — fine for a look, not for work).
@@ -49,7 +55,7 @@ from importlib import resources
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -495,6 +501,38 @@ def policy():
     return policy_snapshot()
 
 
+class ReplayRequest(BaseModel):
+    # Every field optional — an omitted field keeps the live value,
+    # so an empty body replays the current policy (and moves nothing).
+    category_min_confidence: float | None = None
+    weights: dict[str, float] | None = None
+    outage_boost: bool | None = None
+
+
+@app.post("/api/policy/replay")
+def policy_replay(body: ReplayRequest, request: Request):
+    """Replay a hypothetical policy over every stored run.
+
+    The recorded question answers are re-composed in code under the
+    hypothetical (confidence threshold, priority weights, outage
+    boost on/off) and the runs whose queue, band or guardrail
+    outcome would change are reported, before and after, with
+    aggregate counts. Decisions are inputs — no backend is called —
+    and nothing is persisted: the records are byte-identical after
+    a replay. This is the server-side grown-up of the console's
+    browser what-if, which only sketches the open queue.
+    """
+    require_api_key(request)
+    try:
+        return get_service().policy_replay(
+            category_min_confidence=body.category_min_confidence,
+            weights=body.weights,
+            outage_boost=body.outage_boost,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+
+
 class OutcomeRequest(BaseModel):
     final_category: str = ""
     final_queue: str = ""
@@ -615,6 +653,37 @@ def similar_tickets(ticket_id: str, limit: int = 5):
         return get_service().similar_tickets(ticket_id, limit=limit)
     except KeyError:
         raise HTTPException(status_code=404, detail=f"unknown ticket {ticket_id!r}")
+
+
+@app.get("/api/runs/{ticket_id}/export")
+def export_run(ticket_id: str, format: str = "json"):
+    """One run as a portable audit document (exports.py).
+
+    JSON by default; ``?format=text`` renders the same assembly as
+    plain text. Intake with the injection screen's verdict, all
+    eleven answers with distributions, the composition trace
+    (weights, term-by-term math, routing cell, overrides), the
+    guardrail verdicts, the SLA clock, the drift watch's current
+    reading on this run's questions, and the recorded outcome when
+    one exists. Composed in code from the stored record — no model
+    text anywhere in it.
+    """
+    if format not in ("json", "text"):
+        raise HTTPException(status_code=422, detail="format must be 'json' or 'text'")
+    try:
+        eval_payload = _results_payload("calibration_results.json", "calibration")
+        eval_per_question = eval_payload.get("per_question")
+    except HTTPException:
+        eval_per_question = None
+    try:
+        document = get_service().export_run(ticket_id, eval_per_question)
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"unknown ticket {ticket_id!r}")
+    if format == "text":
+        from .exports import render_text
+
+        return PlainTextResponse(render_text(document))
+    return document
 
 
 @app.get("/api/runs/{ticket_id}/assignment")

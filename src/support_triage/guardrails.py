@@ -68,7 +68,22 @@ class GuardrailOutcome:
         }
 
 
-def run_guardrails(decisions: DecisionSet, question_keys: list[str]) -> GuardrailOutcome:
+def run_guardrails(
+    decisions: DecisionSet,
+    question_keys: list[str],
+    *,
+    category_min_confidence: float | None = None,
+) -> GuardrailOutcome:
+    """Run every check over one decision set.
+
+    ``category_min_confidence`` overrides the forcing threshold for
+    this call only (the impact replay, replay.py); the default is
+    the live policy constant and every existing caller passes
+    neither argument nor thought to it.
+    """
+    min_confidence = (
+        CATEGORY_MIN_CONFIDENCE if category_min_confidence is None else category_min_confidence
+    )
     checks: list[GuardrailCheck] = []
     review_reasons: list[str] = []
 
@@ -107,9 +122,9 @@ def run_guardrails(decisions: DecisionSet, question_keys: list[str]) -> Guardrai
     # low confidence (the honesty rule)
     indecisive: list[str] = []
     category_confidence = decisions.confidence("category")
-    if category_confidence < CATEGORY_MIN_CONFIDENCE:
+    if category_confidence < min_confidence:
         indecisive.append(
-            f"category confidence {category_confidence:.2f} < {CATEGORY_MIN_CONFIDENCE}"
+            f"category confidence {category_confidence:.2f} < {min_confidence}"
         )
     for key in GATING_VERIFY:
         p = decisions.probability(key)
