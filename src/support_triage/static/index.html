@@ -104,6 +104,7 @@
 <nav class="viewtabs">
   <button id="tab-console" class="active">Triage console</button>
   <button id="tab-dashboards">Dashboards</button>
+  <button id="tab-compare">Compare backends</button>
 </nav>
 
 <main id="view-console">
@@ -119,6 +120,12 @@
       <div class="row" style="margin-top:12px">
         <button class="primary" id="analyze">Triage ticket</button>
         <span class="note" id="run-status"></span>
+      </div>
+      <label for="batch-json" style="margin-top:16px">…or triage a batch — a JSON array of tickets (max 50)</label>
+      <textarea id="batch-json" spellcheck="false" style="min-height:90px" placeholder='[{"ticket_id": "B-1", "subject": "…", "body": "…"}, …]'></textarea>
+      <div class="row" style="margin-top:8px">
+        <button id="batch-run">Triage batch</button>
+        <span class="note" id="batch-status"></span>
       </div>
     </section>
     <section>
@@ -230,6 +237,29 @@
   </div>
 </main>
 
+<main id="view-compare" style="display:none; grid-template-columns:1fr">
+  <section>
+    <h2>Compare decision backends — one ticket, side by side</h2>
+    <p class="note">The same ticket is screened, decided and composed under each selected backend. Composition (priority, routing, guardrails) is the same code for every column — only the decision model differs. A comparison is an experiment: the ticket is <strong>not</strong> queued and nothing is gated. A backend that is not configured answers with an error column.</p>
+    <label for="cmp-json">Ticket JSON</label>
+    <textarea id="cmp-json" spellcheck="false" style="min-height:130px"></textarea>
+    <label>Backends</label>
+    <div class="row" id="cmp-backends">
+      <label style="margin:0"><input type="checkbox" value="offline" checked style="width:auto"> offline (always available)</label>
+      <label style="margin:0"><input type="checkbox" value="jev" style="width:auto"> jev (TypeSafe)</label>
+      <label style="margin:0"><input type="checkbox" value="llm" style="width:auto"> llm (auto provider)</label>
+      <label style="margin:0"><input type="checkbox" value="openai" style="width:auto"> openai</label>
+      <label style="margin:0"><input type="checkbox" value="anthropic" style="width:auto"> anthropic</label>
+      <label style="margin:0"><input type="checkbox" value="ollama" style="width:auto"> ollama</label>
+    </div>
+    <div class="row" style="margin-top:12px">
+      <button class="primary" id="cmp-run">Run comparison</button>
+      <span class="note" id="cmp-status"></span>
+    </div>
+    <div id="cmp-results" style="margin-top:14px"></div>
+  </section>
+</main>
+
 <footer>
   <div class="footer-brand">
     <img src="/static/brand/tridaai-logo.png" alt="Trida AI">
@@ -254,6 +284,22 @@ function pill(text, cls) { return `<span class="pill ${cls||''}">${esc(text)}</s
 function bandPill(band) {
   const cls = band === 'critical' ? 'bad' : band === 'high' ? 'warn' : band === 'medium' ? '' : 'good';
   return pill(band, cls);
+}
+function fmtDuration(seconds) {
+  if (seconds === null || seconds === undefined) return '';
+  const s = Math.abs(Math.round(seconds));
+  if (s < 3600) return Math.round(s / 60) + 'm';
+  if (s < 86400) return (s / 3600).toFixed(1).replace(/\.0$/, '') + 'h';
+  return (s / 86400).toFixed(1).replace(/\.0$/, '') + 'd';
+}
+function slaChip(t) {
+  // The deterministic SLA clock (distinct from the model's
+  // sla_breach_risk judgement): breached and due-soon are chips,
+  // ok shows the time left, no clock shows nothing.
+  if (!t.sla_state) return '';
+  if (t.sla_state === 'breached') return ' ' + pill('SLA breached ' + fmtDuration(t.seconds_to_breach) + ' ago', 'bad');
+  if (t.sla_state === 'due_soon') return ' ' + pill('SLA due soon · ' + fmtDuration(t.seconds_to_breach) + ' left', 'warn');
+  return ` <span class="note">SLA ${fmtDuration(t.seconds_to_breach)} left</span>`;
 }
 function barRow(label, p, cls) {
   const pct = Math.max(0, Math.min(1, p));
@@ -311,7 +357,7 @@ async function loadQueue() {
   if (!data.tickets || !data.tickets.length) { $('queue').className = 'empty'; $('queue').textContent = qs ? 'No tickets match the filters.' : 'Queue is empty.'; return; }
   $('queue').className = '';
   $('queue').innerHTML = `<table><tr><th>Ticket</th><th>Category</th><th>Priority</th><th>Queue</th><th>Conf.</th></tr>` +
-    data.tickets.map(t => `<tr class="clickable" data-id="${esc(t.ticket_id)}"><td>${esc(t.ticket_id)}<br><span class="note">${esc(t.subject)}</span></td><td>${esc(t.category)}${t.requires_human_review ? ' <span class="flag">review</span>' : ''}${t.is_duplicate ? ' <span class="pill warn">dup</span>' : ''}</td><td>${t.priority_score.toFixed(1)} ${bandPill(t.priority_band)}</td><td>${esc(t.queue)}</td><td>${(t.category_confidence*100).toFixed(0)}%</td></tr>`).join('') + `</table>`;
+    data.tickets.map(t => `<tr class="clickable" data-id="${esc(t.ticket_id)}"><td>${esc(t.ticket_id)}<br><span class="note">${esc(t.subject)}</span></td><td>${esc(t.category)}${t.requires_human_review ? ' <span class="flag">review</span>' : ''}${t.is_duplicate ? ' <span class="pill warn">dup</span>' : ''}</td><td>${t.priority_score.toFixed(1)} ${bandPill(t.priority_band)}${slaChip(t)}</td><td>${esc(t.queue)}</td><td>${(t.category_confidence*100).toFixed(0)}%</td></tr>`).join('') + `</table>`;
   $('queue').querySelectorAll('tr.clickable').forEach(tr => tr.onclick = () => openTicket(tr.dataset.id));
 }
 
@@ -367,8 +413,11 @@ function renderResult(r) {
     <h2 style="margin-top:18px">Guardrails</h2>
     <ul>${checks}</ul>
     ${r.draft ? `<h2 style="margin-top:18px">Template draft (for the agent — never sent by the system)</h2><pre>${esc(r.draft.text)}</pre>` : ''}
+    <h2 style="margin-top:18px">Similar past tickets</h2>
+    <div id="similar-box" class="empty">Loading…</div>
     <h2 style="margin-top:18px">Trace</h2>
     <ul>${trace}</ul>`;
+  loadSimilar(r.ticket_id);
   const waiting = r.status === 'awaiting_agent';
   $('gate-section').style.display = waiting ? '' : 'none';
   $('gate-status').textContent = waiting ? '' : `already decided (${r.status})`;
@@ -389,6 +438,28 @@ async function openTicket(id) {
   const res = await fetch(`/tickets/${encodeURIComponent(id)}`, {headers: headers()});
   if (!res.ok) { $('run-status').textContent = `could not load ${id}`; return; }
   renderResult(await res.json());
+}
+
+async function loadSimilar(id) {
+  const box = $('similar-box');
+  if (!box) return;
+  try {
+    const res = await fetch(`/api/runs/${encodeURIComponent(id)}/similar`, {headers: headers()});
+    if (!res.ok) throw new Error('unavailable');
+    const data = await res.json();
+    if (!data.similar || !data.similar.length) {
+      box.className = 'empty';
+      box.textContent = `No past tickets over the similarity floor (${Number(data.floor).toFixed(2)}) yet.`;
+      return;
+    }
+    box.className = '';
+    box.innerHTML = `<table><tr><th>Ticket</th><th>Similarity</th><th>Triaged as</th><th>Outcome</th></tr>` +
+      data.similar.map(s => `<tr class="clickable" data-id="${esc(s.ticket_id)}"><td>${esc(s.ticket_id)}<br><span class="note">${esc(s.subject)}</span></td><td>${(s.similarity * 100).toFixed(0)}%</td><td>${esc(s.category)} → ${esc(s.queue)} ${bandPill(s.priority_band)}</td><td>${s.outcome_recorded ? `${pill('recorded', 'good')} ${esc(s.outcome.final_category || '—')} → ${esc(s.outcome.final_queue || '—')} · ${s.outcome.resolved ? 'resolved' : 'not resolved'}` : '<span class="note">none recorded</span>'}</td></tr>`).join('') + `</table>`;
+    box.querySelectorAll('tr.clickable').forEach(tr => tr.onclick = () => openTicket(tr.dataset.id));
+  } catch (e) {
+    box.className = 'empty';
+    box.textContent = 'Similar tickets unavailable.';
+  }
 }
 
 $('analyze').onclick = async () => {
@@ -423,8 +494,7 @@ async function decide(decision) {
 }
 $('approve').onclick = () => decide('approved');
 $('reject').onclick = () => decide('rejected');
-$('assign').onclick = async () => {
-  if (!currentId) return;
+$('assign').onclick = async () => {  if (!currentId) return;
   const assignee = $('assignee').value.trim();
   if (!assignee) { $('gate-status').textContent = 'give an assignee first'; return; }
   const res = await fetch(`/tickets/${encodeURIComponent(currentId)}/assign`, {
@@ -441,18 +511,120 @@ $('queue-refresh').onclick = loadQueue;
 ['f-queue', 'f-status', 'f-band', 'f-flag', 'f-backend'].forEach(id => $(id).onchange = loadQueue);
 $('f-q').oninput = () => { clearTimeout(window._qTimer); window._qTimer = setTimeout(loadQueue, 250); };
 
+// ---------------------------------------------------------------- batch
+$('batch-run').onclick = async () => {
+  let items;
+  try { items = JSON.parse($('batch-json').value); }
+  catch (e) { $('batch-status').textContent = 'invalid JSON'; return; }
+  if (!Array.isArray(items)) { $('batch-status').textContent = 'paste a JSON array of tickets'; return; }
+  $('batch-run').disabled = true;
+  $('batch-status').textContent = `triaging ${items.length} tickets…`;
+  try {
+    const res = await fetch('/api/batches', {method: 'POST', headers: headers(), body: JSON.stringify({tickets: items})});
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || res.statusText);
+    const failed = data.results.filter(r => r.status === 'error');
+    $('batch-status').textContent = `batch done: ${data.counts.succeeded}/${data.counts.total} triaged` +
+      (failed.length ? ` · failed: ${failed.map(f => `${f.ticket_id || '(no id)'} — ${f.error}`).join('; ')}` : '');
+    loadQueue();
+  } catch (e) { $('batch-status').textContent = 'error: ' + e.message; }
+  $('batch-run').disabled = false;
+};
+
+// ---------------------------------------------------------------- compare
+function cmpCell(text, hot) { return `<td${hot ? ' class="flag"' : ''}>${text}</td>`; }
+
+function renderCompare(payload) {
+  const cols = payload.backends || [];
+  const hot = new Set((payload.disagreements || []).map(d => `${d.backend}|${d.field}`));
+  const head = cols.map(c => c.error
+    ? `<th>${esc(c.backend)}<br><span class="flag">${esc(c.error)}</span></th>`
+    : `<th>${esc(c.backend)}${c.backend === payload.reference_backend ? ' (reference)' : ''}<br><span class="note">${esc(c.model || '')} · ${c.latency_ms} ms</span></th>`).join('');
+  const cell = (c, field, text) => c.error ? '<td>—</td>' : cmpCell(text, hot.has(`${c.backend}|${field}`));
+  const rows = [];
+  const q = (c, key) => (c.answers && c.answers[key]) || {};
+  rows.push(['Category', 'category', c => esc(c.category)]);
+  rows.push(['Product area', 'product_area', c => esc(c.product_area)]);
+  rows.push(['Priority', 'priority_score', c => `${Number(c.priority_score).toFixed(1)} (${esc(c.priority_band)})`]);
+  rows.push(['Queue', 'queue', c => esc(c.queue) + (c.override ? ` <span class="note">via ${esc(c.override)} override</span>` : '')]);
+  rows.push(['Guardrails', 'guardrails', c => c.guardrails.passed ? '<span class="check-pass">passed</span>' : '<span class="check-fail">FAILED</span>']);
+  rows.push(['Human review forced', 'requires_human_review', c => c.guardrails.requires_human_review ? '<span class="flag">yes</span>' : 'no']);
+  const keys = cols.filter(c => !c.error).flatMap(c => Object.keys(c.answers || {}));
+  [...new Set(keys)].forEach(key => {
+    rows.push([key, 'answer:' + key, c => {
+      const a = q(c, key);
+      if (a.value === undefined) return '—';
+      const v = typeof a.value === 'number' ? Number(a.value).toFixed(2) : esc(a.value);
+      return `${v} <span class="note">(${(Number(a.confidence) * 100).toFixed(0)}%)</span>`;
+    }]);
+  });
+  const body = rows.map(([label, field, get]) =>
+    `<tr><th>${esc(label)}</th>${cols.map(c => cell(c, field, get(c))).join('')}</tr>`).join('');
+  const diffs = (payload.disagreements || []).map(d =>
+    `<li><strong>${esc(d.backend)}</strong> · ${esc(d.field)}: ${esc(JSON.stringify(d.reference))} → ${esc(JSON.stringify(d.value))}</li>`).join('');
+  $('cmp-results').innerHTML =
+    `<p style="margin:0 0 8px">Reference: <strong>${esc(payload.reference_backend || '—')}</strong> · <strong>${payload.disagreement_count}</strong> disagreement(s)${payload.disagreement_count ? '' : ' — the backends agree on this ticket'}.</p>` +
+    (diffs ? `<ul>${diffs}</ul>` : '') +
+    `<table><tr><th></th>${head}</tr>${body}</table>` +
+    `<p class="note" style="margin-top:8px">Comparison ${esc(payload.comparison_id)} — archived as its own record (GET /api/compare/${esc(payload.comparison_id)}). The ticket was not queued.</p>`;
+}
+
+$('cmp-run').onclick = async () => {
+  let ticket;
+  try { ticket = JSON.parse($('cmp-json').value); }
+  catch (e) { $('cmp-status').textContent = 'invalid JSON'; return; }
+  const backends = [...document.querySelectorAll('#cmp-backends input:checked')].map(i => i.value);
+  if (!backends.length) { $('cmp-status').textContent = 'select at least one backend'; return; }
+  $('cmp-run').disabled = true;
+  $('cmp-status').textContent = 'comparing…';
+  try {
+    const res = await fetch('/api/compare', {method: 'POST', headers: headers(), body: JSON.stringify({ticket, backends})});
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || res.statusText);
+    renderCompare(data);
+    $('cmp-status').textContent = `done — ${data.disagreement_count} disagreement(s) vs ${data.reference_backend}`;
+  } catch (e) { $('cmp-status').textContent = 'error: ' + e.message; }
+  $('cmp-run').disabled = false;
+};
+
+// ---------------------------------------------------------------- live updates (SSE, polling fallback)
+let pollTimer = null;
+function refreshLive() {
+  loadQueue();
+  if ($('view-dashboards').style.display !== 'none') { dashboardsLoaded = false; loadDashboards(); }
+}
+function startPolling() {
+  if (pollTimer) return;
+  pollTimer = setInterval(loadQueue, 15000);
+}
+function subscribeEvents() {
+  // Live updates over /api/events; if the stream can't be held
+  // (including when API_KEY is set — EventSource cannot send the
+  // header), polling takes over so the queue still stays fresh.
+  if (!('EventSource' in window)) { startPolling(); return; }
+  try {
+    const es = new EventSource('/api/events');
+    ['run_completed', 'guardrail_blocked', 'outcome_recorded', 'batch_completed']
+      .forEach(type => es.addEventListener(type, refreshLive));
+    es.onerror = () => { es.close(); startPolling(); };
+  } catch (e) { startPolling(); }
+}
+
 // ---------------------------------------------------------------- views
 let dashboardsLoaded = false;
 function showView(name) {
-  const dash = name === 'dashboards';
-  $('view-console').style.display = dash ? 'none' : '';
-  $('view-dashboards').style.display = dash ? '' : 'none';
-  $('tab-console').classList.toggle('active', !dash);
-  $('tab-dashboards').classList.toggle('active', dash);
-  if (dash && !dashboardsLoaded) loadDashboards();
+  $('view-console').style.display = name === 'console' ? '' : 'none';
+  $('view-dashboards').style.display = name === 'dashboards' ? '' : 'none';
+  $('view-compare').style.display = name === 'compare' ? '' : 'none';
+  $('tab-console').classList.toggle('active', name === 'console');
+  $('tab-dashboards').classList.toggle('active', name === 'dashboards');
+  $('tab-compare').classList.toggle('active', name === 'compare');
+  if (name === 'dashboards' && !dashboardsLoaded) loadDashboards();
+  if (name === 'compare' && !$('cmp-json').value) $('cmp-json').value = $('json').value;
 }
 $('tab-console').onclick = () => showView('console');
 $('tab-dashboards').onclick = () => showView('dashboards');
+$('tab-compare').onclick = () => showView('compare');
 $('dash-refresh').onclick = loadDashboards;
 
 // ---------------------------------------------------------------- policy
@@ -486,7 +658,8 @@ function renderPolicy() {
       <p class="note" style="margin-top:6px">Bands: ${esc(bands)}</p></div>
       <div><p style="margin:0 0 6px"><strong>Routing overrides</strong></p><ul>${overrides}</ul>
       <p style="margin:10px 0 6px"><strong>Area refinements</strong></p><ul>${refinements}</ul>
-      <p class="note" style="margin-top:6px">Guardrails force human review below category confidence ${POLICY.guardrails.category_min_confidence}; verify answers are decisive outside (${POLICY.guardrails.verify_decisive_low}, ${POLICY.guardrails.verify_decisive_high}). Autonomy bar: category in {${POLICY.autonomy.auto_resolvable_categories.map(esc).join(', ')}} at confidence ≥ ${POLICY.autonomy.min_category_confidence} — ${esc(POLICY.autonomy.note)}.</p></div>
+      <p class="note" style="margin-top:6px">Guardrails force human review below category confidence ${POLICY.guardrails.category_min_confidence}; verify answers are decisive outside (${POLICY.guardrails.verify_decisive_low}, ${POLICY.guardrails.verify_decisive_high}). Autonomy bar: category in {${POLICY.autonomy.auto_resolvable_categories.map(esc).join(', ')}} at confidence ≥ ${POLICY.autonomy.min_category_confidence} — ${esc(POLICY.autonomy.note)}.</p>
+      ${POLICY.sla ? `<p class="note" style="margin-top:6px"><strong>SLA clock targets</strong> (deterministic — separate from the model's sla_breach_risk judgement): ${Object.entries(POLICY.sla.target_hours).map(([b, h]) => `${esc(b)} ${h}h`).join(' · ')}; due soon in the last ${(POLICY.sla.due_soon_fraction * 100).toFixed(0)}% of the clock.</p>` : ''}</div>
     </div>`;
 }
 
@@ -512,6 +685,8 @@ async function loadDashboards() {
   $('d-tiles').innerHTML =
     tile(ov.total_runs, 'total runs') +
     tile((ov.by_status || {}).awaiting_agent || 0, 'awaiting agent') +
+    tile((ov.sla || {}).breached || 0, 'SLA breached') +
+    tile((ov.sla || {}).due_soon || 0, 'SLA due soon') +
     tile(ov.rates.low_confidence_forcing.count, 'forced review') +
     tile(ov.rates.template_draft.count, 'drafts offered') +
     tile(ov.outcomes_recorded, 'outcomes recorded') +
@@ -651,6 +826,7 @@ loadSamples();
 loadEvals();
 loadQueue();
 loadPolicy();
+subscribeEvents();
 </script>
 </body>
 </html>
