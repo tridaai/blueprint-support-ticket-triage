@@ -107,8 +107,8 @@ Or natively, offline, in about a minute:
 ```bash
 uv sync --extra dev        # or, without uv: make install-pip
 make demo                  # one ticket, traced end to end
-make test                  # 318 tests
-make evals                 # golden routing 65/65 · calibration gates pass
+make test                  # 339 tests
+make evals                 # golden routing 67/67 · calibration gates pass
 make serve                 # API + console on :8000
 ```
 
@@ -180,7 +180,7 @@ Two packs, both deterministic offline:
   below the use floor, a pre-link record counted but never
   attributed — and a firewall case pinning that a flagged template
   changes no composition and suppresses no draft).
-  Gate: ≥ 95%. Current: **65/65**.
+  Gate: ≥ 95%. Current: **67/67**.
 - **Calibration pack** (`evals/run_calibration.py`) — the headline
   eval for a decision system: reliability bins and Brier scores per
   question against the golden truths. Verify Briers ≤ 0.013, category
@@ -633,6 +633,64 @@ itself used — the population evidence beside the one run.
 Golden G64–G65 pin the arithmetic (hand-counted), the withheld
 rates, the unknown-template accounting, and the firewall.
 
+## Incident clustering: the outage is twenty tickets wearing twenty names
+
+Everything above looks at one ticket, or at one customer's
+tickets. Threads group one customer's runs (different customers
+never share a thread, by construction); the outage override fires
+per ticket when the decision answers say *this* ticket reports an
+outage. Neither can say the sentence a support lead needs when a
+product breaks: *these fourteen open tickets are one event.*
+The clustering layer (`incidents.py`) can:
+
+- **Proposals are computed in code, on every read.** A group of
+  stored runs proposes as a cluster when they share one product
+  area AND one category (the records' own decided fields),
+  arrived within 6 hours of the group's earliest report, number
+  at least 4, and every member's text shares token containment
+  of at least 0.30 with the first report's — the thread
+  machinery's own measure, set looser than the thread threshold
+  (0.35) because many customers phrase one failure many ways,
+  with the joint signal carrying the difference. The constants
+  print on every proposal, with each member's overlap, the span,
+  and the customer count. Reopen runs, confirmed duplicates, and
+  members of an open incident are excluded from the evidence and
+  counted by name. The suggested incident title is composed in
+  code from the shared fields.
+- **A lead confirms or dismisses; both acts are stored.**
+  Confirming opens an incident (its own record, migration
+  `0005`): the proposal's signals as the lead saw them, the
+  members, the lead's name. Dismissing stores the member set —
+  that exact set never proposes again, while a set that gains a
+  member is new evidence and may propose, naming the dismissal
+  it outgrew.
+- **Membership is an overlay, and it moves nothing.** Membership
+  lives on the incident record; a member run's record — answers,
+  composition, draft, decision, outcome — is byte-identical
+  whether or not it belongs to an incident (the pack pins it
+  across confirm, add, decline and close). No priority changes,
+  no merges, and closing the incident closes no member: closure
+  is a named act about the incident, and each member's outcome
+  stays its own flow's business.
+- **Late arrivals are offered, never attached.** A ticket
+  arriving after confirmation that matches the incident — same
+  placement, words tied to its first report, inside the window
+  after its latest member — is proposed as an addition; the lead
+  adds or declines it per ticket, and a declined ticket is never
+  offered for that incident again.
+
+Surfaces: an Incidents tab in the console (proposals with
+confirm/dismiss, the incident working page), `GET
+/api/incidents/proposals`, `POST
+/api/incidents/proposals/{id}/confirm` / `.../dismiss`, `GET
+/api/incidents` / `/{id}` / `/{id}/additions`, `POST
+/api/incidents/{id}/members` / `.../members/decline` /
+`/{id}/close`, a badge on the queue row, an `incident_context`
+line on the run's record view, and a block in the run audit
+export for member runs. Golden G66–G67 pin the proposal rule
+(exact member set; a same-area different-category group and a
+below-floor group propose nothing) and the whole lifecycle.
+
 ## Batch, compare, similar tickets, SLA clocks, events, webhooks
 
 The operations surface around the pipeline:
@@ -735,6 +793,7 @@ src/support_triage/
   playbooks.py    authored category playbooks + the check-off overlay reads
   workbench.py    resolution knowledge, the working-note composer, refusals
   reviews.py      QA review: the seeded sampler, verdicts, agreement report, inter-rater kappa
+  incidents.py    incident clustering: computed proposals, stored acts, membership overlay
   dossier.py      the customer dossier: history, flags, the context block
   compare.py      one ticket under several backends, diffed, unqueued
   sla.py          the deterministic SLA clock (band targets vs age)
@@ -747,7 +806,7 @@ src/support_triage/
   checkpoints.py  LangGraph saver selection (Postgres / memory)
   api.py          FastAPI transport; demo.py / cli.py the other surfaces
 evals/            golden.jsonl + the two runners
-migrations/       0001 records · 0002 pgvector embeddings · 0003 outcomes + run errors · 0004 review samples + verdicts
+migrations/       0001 records · 0002 pgvector embeddings · 0003 outcomes + run errors · 0004 review samples + verdicts · 0005 incidents + cluster dismissals
 tests/            the hermetic suite (pytest)
 ```
 

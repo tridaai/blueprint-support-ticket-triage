@@ -673,6 +673,87 @@ word. The audit export carries the run's own template's row
 of one run meets the population evidence without the export
 becoming a second report implementation.
 
+## Incident clustering
+
+`incidents.py` adds the one grouping the rest of the system is
+built to refuse. Threads group a single customer's runs and
+forbid cross-customer grouping outright (a thread is a
+conversation); the composition outage override acts on one
+ticket's answers at a time. An incident is the orthogonal fact:
+many customers, one underlying event, each reporting it in
+their own words.
+
+**Proposals computed, human acts stored.** The proposal is a
+deterministic function of the stored runs and the stored human
+acts, recomputed on every read — a stored proposal would freeze
+a view of a queue that keeps moving, and the round-8 precedent
+(store the draw, because a seeded random act cannot be
+recomputed) cuts the other way here: nothing about a proposal
+is random, so nothing about it needs storing. What is stored
+is what a lead did: incidents and dismissals, in their own
+tables (migration `0005`), under the same store idiom as the
+review records. Confirmation recomputes the proposal it names,
+so the set confirmed is the set as it stands at that moment —
+a fingerprint that no longer computes is refused as stale
+rather than honoured as history.
+
+**The rule, and why it is shaped that way.** Grouping is greedy
+by arrival inside one (product_area, category) bucket: the
+earliest unclaimed run anchors, and members must arrive inside
+its window and clear token containment against the ANCHOR's
+text. Anchor containment — rather than pairwise chaining —
+keeps every member tied to the first report by name, so a
+group cannot drift topic link by link; the cost, stated rather
+than hidden, is that a run arriving before an anchor can never
+join that anchor's group, and a group the floor rejects leaves
+its would-be members for a later scan. The threshold (0.30)
+sits below the thread threshold (0.35): threads match one
+customer against their own earlier phrasing, incidents match
+strangers describing one failure, and the joint evidence —
+same placement, six hours, four reports — carries what the
+looser wording gives up. Every constant is authored in the
+module and printed on the proposal payload, so the rule
+travels with its output.
+
+**Membership as overlay, with the firewall stated precisely.**
+Membership is recorded only on the incident record. A member's
+`TicketResult` is byte-identical with and without membership —
+pinned across confirm, add, decline and close — and composition
+cannot be affected at all: composition happens at triage, which
+always precedes membership (proposals and addition candidates
+read stored runs only), and no incident code path composes,
+routes, or decides anything. The only places membership is
+visible are read surfaces computed from the incident records
+at read time: the queue badge, the run view's
+`incident_context` line, the audit export's incident block
+(handed in by the service like the QA verdicts), and the
+incident page, whose member rows are read live from the runs
+so the page can never disagree with the queue. Closure follows
+the same line: it changes the incident's status and nothing
+else — a member's status, decision and outcome remain whatever
+its own flow made them — and the freed members become eligible
+evidence for future clusters again, which is what a recurrence
+should look like.
+
+**The watermark, twice.** A dismissal stores the refused
+member set and suppresses exactly that set on later scans;
+growth re-proposes and names the dismissal it outgrew, because
+a grouping that picked up a fifth report after being refused
+at four is a different judgement call, and hiding it would
+make the watermark a memory hole instead of a courtesy. The
+decline is the same discipline inside an incident, scoped to
+(incident, ticket): a ticket declined as an addition is never
+offered for that incident again, and remains fully eligible
+for any other incident or cluster — the refusal was about this
+event, not about the ticket.
+
+Incident lifecycle events (`incident_opened`,
+`incident_member_added`, `incident_addition_declined`,
+`incident_closed`, `cluster_dismissed`) ride the same service
+bus as the run lifecycle; the webhook set is unchanged, because
+a gate webhook subscriber contracted for run events, not for a
+lead's grouping decisions.
+
 ## Events, comparisons, and SLA clocks
 
 **The event bus** (`events.py: EventBus`, owned by the service) is
