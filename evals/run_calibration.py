@@ -61,6 +61,11 @@ def collect_samples(engine=None) -> tuple[list[dict], str]:
     samples: list[dict] = []
     backend_name = "offline"
     for case in cases:
+        if "expected" not in case:
+            # QA-review cases carry no per-ticket truth block — their
+            # runs are graded by human verdicts, not by authored
+            # expectations, so they contribute no calibration samples.
+            continue
         service = fresh_service(engine)
         # Reopen cases sample their final reopened run — its answers
         # are what the case's `expected` block describes.

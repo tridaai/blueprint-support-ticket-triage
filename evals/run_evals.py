@@ -1,6 +1,6 @@
 """Golden routing eval: known tickets in, routing truth checked.
 
-Fifty-five synthetic tickets with authored expectations — category,
+Fifty-eight synthetic tickets with authored expectations — category,
 queue, priority band, and the five safety/engineering verify flags.
 (36 through round 2; round 3 added multi-issue tickets, three more
 injection phrasings, a calm ticket that must stay low, a repeat
@@ -15,7 +15,12 @@ calibration accounting, and the correction refusals; the workbench
 round added the workbench cases — resolution knowledge over seeded
 neighbours with outcomes, the small-sample withholding, the
 playbook overlay actions and refusals, and the working-note draft
-carrying the routing reason verbatim.)
+carrying the routing reason verbatim; the QA-review round added the
+review cases — a seeded world of decided runs whose stratified
+sample is asserted exactly, verdicts graded against the agreement
+report's math including the withheld rate below the verdict floor,
+and the records and calibration payload pinned byte-identical
+across grading.)
 Each case runs the full pipeline (screen → duplicate → one decision
 call → composition → guardrails) through a fresh service, on the
 deterministic offline backend by default, so the gate is hermetic:
@@ -40,7 +45,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from support_triage import corrections  # noqa: E402
 from support_triage.backends import OfflineDecisionEngine  # noqa: E402
 from support_triage.embeddings import HashingEmbedder, InMemoryVectorIndex  # noqa: E402
-from support_triage.livecal import live_calibration  # noqa: E402
+from support_triage.livecal import live_calibration, live_samples  # noqa: E402
 from support_triage.objectstore import InMemoryObjectStore  # noqa: E402
 from support_triage.schemas import AgentOutcome, TicketInput  # noqa: E402
 from support_triage.service import TriageService  # noqa: E402
@@ -445,6 +450,173 @@ def check_case(case: dict, result) -> list[str]:
     return failures
 
 
+def check_review_case(service: TriageService, case: dict) -> list[str]:
+    """QA-review cases (round 8): grading the triage itself.
+
+    Seeds a world of runs, decides them at the gate (the review
+    population is decided runs — the store's own word), optionally
+    marks a confirmed duplicate, then draws the sample and asserts
+    the draw itself: the exact run ids for the case's seed, the
+    population accounting (decided total, exclusions by name), and
+    a redraw that must reproduce it. Declared verdicts are recorded
+    (``expect_error`` names the refusal a correct implementation
+    must raise), and the agreement report is graded on its math:
+    per-family rates, the per-backend split, the disagreement
+    count, the withheld rate below the floor. When the case asks
+    for the pins, the run records and the live calibration payload
+    are snapshotted before the verdicts and must be byte-identical
+    after — grading a triage changes nothing about it.
+    """
+    failures: list[str] = []
+    for entry in case.get("review_seed", []):
+        ticket = TicketInput.model_validate(entry["ticket"])
+        service.run_ticket(ticket)
+        if entry.get("outcome"):
+            _record_eval_outcome(service, ticket.ticket_id, entry["outcome"])
+        if entry.get("decide", True):
+            service.record_decision(ticket.ticket_id, "approved", by="eval-agent")
+    for entry in case.get("review_seed", []):
+        if entry.get("duplicate_of"):
+            service.mark_duplicate(
+                entry["ticket"]["ticket_id"],
+                entry["duplicate_of"],
+                actor="eval-operator",
+                reason="the customer re-sent the same ticket",
+            )
+
+    spec = case["qa_sample"]
+    sample = service.create_review_sample(
+        size=spec["size"],
+        seed=spec.get("seed", 0),
+        created_by="eval-qa",
+        exclude_previously_reviewed=spec.get("exclude_previously_reviewed", True),
+    )
+    expect_ids = spec.get("expect_run_ids")
+    if expect_ids is not None and sample.run_ids != expect_ids:
+        failures.append(
+            f"sampler drew {sample.run_ids}, expected exactly {expect_ids} "
+            "(same store + seed + size must reproduce the same sample)"
+        )
+    for key, wanted in spec.get("expect_population", {}).items():
+        if sample.population.get(key) != wanted:
+            failures.append(
+                f"sample population[{key!r}] = {sample.population.get(key)}, expected {wanted}"
+            )
+    if spec.get("expect_redraw_same"):
+        redraw = service.create_review_sample(
+            size=spec["size"], seed=spec.get("seed", 0), created_by="eval-qa",
+            exclude_previously_reviewed=spec.get("exclude_previously_reviewed", True),
+        )
+        if redraw.run_ids != sample.run_ids:
+            failures.append(
+                f"redraw with the same seed gave {redraw.run_ids}, expected {sample.run_ids}"
+            )
+
+    snapshot = None
+    if case.get("qa_pins"):
+        records = service.store.all_records()
+        snapshot = (
+            json.dumps([r.model_dump() for r in records], sort_keys=True, default=str),
+            json.dumps(live_samples(records), sort_keys=True, default=str),
+            json.dumps(live_calibration(records), sort_keys=True, default=str),
+        )
+
+    for verdict_spec in case.get("qa_verdicts", []):
+        expect_error = verdict_spec.get("expect_error")
+        try:
+            service.record_review_verdict(
+                sample.sample_id,
+                ticket_id=verdict_spec["ticket"],
+                reviewer=verdict_spec.get("reviewer", "eval-reviewer"),
+                families=verdict_spec.get("families", {}),
+                overall=verdict_spec.get("overall", ""),
+                note=verdict_spec.get("note", ""),
+            )
+        except Exception as exc:  # noqa: BLE001 — a refusal is data here
+            if expect_error and expect_error in str(exc):
+                continue
+            failures.append(
+                f"verdict on {verdict_spec['ticket']} raised {exc!r}, expected success"
+                if not expect_error
+                else f"verdict on {verdict_spec['ticket']} raised {exc!r}, "
+                f"expected a refusal naming {expect_error!r}"
+            )
+            continue
+        if expect_error:
+            failures.append(
+                f"verdict on {verdict_spec['ticket']} was accepted, "
+                f"expected a refusal naming {expect_error!r}"
+            )
+
+    if case.get("qa_pins") and snapshot is not None:
+        records = service.store.all_records()
+        after = (
+            json.dumps([r.model_dump() for r in records], sort_keys=True, default=str),
+            json.dumps(live_samples(records), sort_keys=True, default=str),
+            json.dumps(live_calibration(records), sort_keys=True, default=str),
+        )
+        labels = ("run records", "live calibration samples", "live calibration payload")
+        for label, before_blob, after_blob in zip(labels, snapshot, after):
+            if before_blob != after_blob:
+                failures.append(
+                    f"recording verdicts changed the {label} — grading must be inert"
+                )
+
+    report_spec = case.get("qa_expect_report")
+    if report_spec:
+        report = service.review_report([sample.sample_id])
+        for key in ("verdicts", "overall_agree", "sampled_runs", "verdicted_runs"):
+            if key in report_spec and report[key] != report_spec[key]:
+                failures.append(
+                    f"report {key} = {report[key]}, expected {report_spec[key]}"
+                )
+        if "overall_rate" in report_spec and report["overall_rate"] != report_spec["overall_rate"]:
+            failures.append(
+                f"report overall rate = {report['overall_rate']}, "
+                f"expected {report_spec['overall_rate']}"
+            )
+        for family, wanted in report_spec.get("families", {}).items():
+            row = report["families"][family]
+            agree, rate = wanted
+            if row["agree"] != agree or row["rate"] != rate:
+                failures.append(
+                    f"report family {family} = agree {row['agree']}, rate {row['rate']}; "
+                    f"expected agree {agree}, rate {rate}"
+                )
+        if "disagreement_rows" in report_spec and len(report["disagreements"]) != report_spec["disagreement_rows"]:
+            failures.append(
+                f"report lists {len(report['disagreements'])} disagreement rows, "
+                f"expected {report_spec['disagreement_rows']}"
+            )
+        if "by_backend" in report_spec and sorted(report["by_backend"]) != report_spec["by_backend"]:
+            failures.append(
+                f"report backends = {sorted(report['by_backend'])}, "
+                f"expected {report_spec['by_backend']}"
+            )
+        if "note_contains" in report_spec and report_spec["note_contains"] not in report["note"]:
+            failures.append(
+                f"report note {report['note']!r} does not name {report_spec['note_contains']!r}"
+            )
+
+    for more in case.get("qa_more_samples", []):
+        follow = service.create_review_sample(
+            size=more["size"],
+            seed=more.get("seed", 0),
+            created_by="eval-qa",
+            exclude_previously_reviewed=more.get("exclude_previously_reviewed", True),
+        )
+        for key, wanted in more.get("expect_population", {}).items():
+            if follow.population.get(key) != wanted:
+                failures.append(
+                    f"follow-up sample population[{key!r}] = {follow.population.get(key)}, "
+                    f"expected {wanted}"
+                )
+        for absent in more.get("expect_absent", []):
+            if absent in follow.run_ids:
+                failures.append(f"follow-up sample drew {absent}, which it must exclude")
+    return failures
+
+
 def main() -> int:
     cases = load_cases()
     service = fresh_service()
@@ -453,7 +625,9 @@ def main() -> int:
     for case in cases:
         # A fresh service per case keeps the duplicate index honest:
         # only a case's own `previous` ticket may link to it.
-        if "operator_actions" in case:
+        if "qa_sample" in case:
+            failures = check_review_case(fresh_service(), case)
+        elif "operator_actions" in case:
             failures = check_operator_case(fresh_service(), case)
         elif "neighbours" in case or "workbench_actions" in case:
             failures = check_workbench_case(fresh_service(), case)
