@@ -183,6 +183,8 @@ PostgreSQL and the test doubles, so the numbers are the numbers):
   log (a failed run leaves no record; it still gets counted).
 - `GET /api/stats/calibration` — the eval pack's calibration next to
   **live calibration** (below), in one payload.
+- `GET /api/stats/drift` — the **drift watch** (below): the recent
+  live window's per-question Brier against the eval baseline.
 - `GET /api/policy` — the composition config as data: priority
   weights, band floors, the routing matrix with refinements and
   override precedence, guardrail thresholds, the autonomy bar.
@@ -217,6 +219,35 @@ against those outcomes with the *same* binning and Brier code as the
 eval pack (`calibration.py`), and reports category/queue accuracy
 and resolution rate alongside. With no outcomes recorded, the panel
 says exactly that — there is no synthetic stand-in for ground truth.
+
+**The drift watch** (`GET /api/stats/drift`) exists because an
+all-time average hides the failure that matters: the engine was
+calibrated in March and has been degrading since. It replays the
+labelled outcome stream in recorded order, scores the last
+`DRIFT_WINDOW` (50) outcomes, and compares each question's windowed
+Brier to the eval baseline it shipped with. A question flags DRIFT
+only when the window degrades by at least `DRIFT_BRIER_THRESHOLD`
+(0.05) **and** holds at least `DRIFT_MIN_SAMPLES` (20) samples —
+below the floor the panel says "warming up" instead of crying wolf
+over six outcomes. All three values are environment-tunable and are
+printed in the payload next to the flags. The calibration panel
+renders the watch under the eval-vs-live tables.
+
+**Assignment suggestions** (`GET /api/runs/{ticket_id}/assignment`)
+answer the gate's next question — who should take this? — from a
+bundled agent roster (`data/agent_roster.json`: the queues each
+agent covers, their skill tags; synthetic people, replace with your
+own). Agents covering the ticket's queue are scored in code:
+track record in the ticket's category from recorded outcomes
+(resolved share; no history is a neutral 0.5, not a demerit),
+current open load (tickets still at the gate carrying their
+`[assigned to …]` note), and skill overlap with the ticket's
+category, product area and raised flags. The endpoint returns the
+top suggestion and two runners-up with the per-factor reasons
+printed — and assigns nothing. It is a read; the only assignment in
+the system is still the human's `POST /tickets/{id}/assign`, and
+the console's "use suggestion" button merely fills in the gate
+form's assignee field for the human to submit.
 
 ## Batch, compare, similar tickets, SLA clocks, events, webhooks
 
@@ -310,6 +341,9 @@ src/support_triage/
   embeddings.py   embedders + vector index (duplicate check)
   calibration.py  reliability bins + Brier math for the eval pack
   livecal.py      agent outcomes -> live calibration (same math)
+  drift.py        rolling-window drift watch vs the eval baseline
+  roster.py       the agent roster (queues covered, skill tags)
+  assignment.py   advisory assignee ranking — reasons printed, never writes
   compare.py      one ticket under several backends, diffed, unqueued
   sla.py          the deterministic SLA clock (band targets vs age)
   events.py       run events + the lifecycle bus behind /api/events

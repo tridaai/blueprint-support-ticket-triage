@@ -186,6 +186,42 @@ client-side over fetched records and persists nothing: it answers
 "what would this threshold do to today's queue?" without giving a
 hypothetical the power to touch a real record.
 
+## Drift watch and assignment suggestions
+
+Two round-4 additions sit on top of the outcome stream, and both
+are reads over the same records — neither writes anything.
+
+The **drift watch** (`drift.py`) replays the labelled outcomes in
+`recorded_at` order (ties broken by ticket id, so the stream is
+deterministic), takes the last `DRIFT_WINDOW` of them, and runs the
+window and the full stream through the same `calibration_report`.
+Each question's row carries the eval baseline Brier, the all-time
+live Brier, the windowed Brier, and both sample counts; the flag is
+`window_n ≥ DRIFT_MIN_SAMPLES and window_brier − eval_brier ≥
+DRIFT_BRIER_THRESHOLD`. The sample floor is the design point: Brier
+over a handful of outcomes is noise, so the watch refuses to flag
+what it cannot yet measure — the row reports as warming up instead.
+Without an eval baseline there is nothing to degrade *from*, and
+the payload says that too. Thresholds are environment config read
+at call time, in the same idiom as `SIMILARITY_FLOOR`, and the
+values in force travel in the payload.
+
+**Assignment suggestions** (`assignment.py`, roster in `roster.py`
++ `data/agent_roster.json`) rank the roster agents covering a
+waiting ticket's queue by a weighted sum — track record 0.50
+(resolved share of the outcomes that agent recorded in the
+ticket's category, matched by roster id or name; no history scores
+a neutral 0.5), open load 0.30 (`1/(1+open)`, where open counts
+gate-waiting records whose latest `[assigned to …]` note names the
+agent — the note idiom is the only assignment record the system
+keeps, so the suggestion reads the same source the humans write),
+skills 0.20 (share of the ticket's needs — category, product area,
+raised flags — covered by the agent's tags). Every candidate
+carries its per-factor reasons as strings; the console prints them
+verbatim. The feature's invariant is structural: the module has no
+store handle and no write path, the endpoint is a GET, and the
+ticket's record is byte-identical after a suggestion is served.
+
 ## Events, comparisons, and SLA clocks
 
 **The event bus** (`events.py: EventBus`, owned by the service) is
