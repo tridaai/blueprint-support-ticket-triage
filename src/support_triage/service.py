@@ -506,6 +506,19 @@ class TriageService:
 
         return live_calibration(self.store.all_records())
 
+    def template_effectiveness(self) -> dict:
+        """Do the template drafts earn their place?
+        (template_effectiveness.py): per-template resolution,
+        reopen, and escalation rates over the outcome-bearing runs,
+        against their categories' baselines, with the needs-review
+        flag for the templates' owners. A pure read model — it
+        feeds nothing back into composition or the drafts."""
+        from . import template_effectiveness
+
+        return template_effectiveness.effectiveness_report(
+            self.store.all_records()
+        )
+
     def stats_drift(self, eval_per_question: dict | None) -> dict:
         from .drift import drift_report
 
@@ -1524,6 +1537,11 @@ class TriageService:
             "questions": questions,
         }
         entries = self.review_entries_for(ticket_id)
+        from . import template_effectiveness
+
+        report = template_effectiveness.effectiveness_report(
+            self.store.all_records()
+        )
         return build_export(
             record,
             exported_at=format_timestamp(datetime.now(timezone.utc)),
@@ -1531,6 +1549,9 @@ class TriageService:
             sla=sla_clock(record),
             drift=drift,
             review={"verdicts": entries} if entries else None,
+            template_stats=template_effectiveness.template_stats_for_run(
+                report, record
+            ),
         )
 
     # -- reads --------------------------------------------------------------
