@@ -21,7 +21,12 @@ Shape (one pass, then a human gate)::
   applies the reopen consequences: the decision call receives the
   prior run's record as port context, the priority band is floored
   one step up, the template draft is suppressed in code, and the
-  reopen-limit guardrail can force human review.
+  reopen-limit guardrail can force human review. On every run the
+  decision call also receives the customer-history block the
+  service composed from the customer's prior records (dossier.py)
+  as port context, and compose records the history summary on the
+  run — context for the call and the human, never an input to the
+  formula.
 - ``agent_gate`` pauses the graph (LangGraph ``interrupt``) with the
   record saved and status ``awaiting_agent``. Nothing has been sent
   to anyone; nothing ever is, by this system.
@@ -53,9 +58,11 @@ from .sla import format_timestamp
 from .schemas import (
     AutonomyInfo,
     CompositionInfo,
+    CustomerHistoryInfo,
     DraftInfo,
     DuplicateInfo,
     GuardrailInfo,
+    HistoryFlag,
     QuestionAnswer,
     ReopenInfo,
     RunTelemetry,
@@ -94,6 +101,13 @@ class TriageState(TypedDict, total=False):
     # the decide node. Absent/empty on a first-pass run.
     reopen: dict
     prior_context: str
+    # Customer history (set by the service on every run, dossier.py):
+    # the history block composed from the customer's prior records —
+    # offered to the decide node alongside any reopen context — and
+    # the summary dict the compose node records on the run. Absent
+    # when the graph is driven without the service.
+    history_context: str
+    history: dict
     # The conversation thread this run belongs to (threads.py),
     # assigned by the service at intake.
     thread_id: str
@@ -218,13 +232,23 @@ def build_graph(
 
     def decide(state: TriageState) -> dict:
         ticket = TicketInput.model_validate(state["ticket"])
-        # On a reopen, the prior run's record rides as the port's
-        # context argument — fenced history for the LLM/Jev adapters,
-        # ignored by the offline heuristics; state_text itself is
-        # still only the new (screened) customer message.
-        decisions = engine.decide(
-            state["state_text"], questions, context=state.get("prior_context", "")
+        # The port's context argument carries history, never new
+        # customer text: on a reopen, the prior run's record; on
+        # every run, the customer-history block composed in code
+        # from the customer's prior records (dossier.py — counts
+        # and categories only). Both ride together when both exist.
+        # Fenced history for the LLM/Jev adapters, ignored by the
+        # offline heuristics; state_text itself is still only the
+        # new (screened) customer message.
+        context = "\n\n".join(
+            part
+            for part in (
+                state.get("prior_context", ""),
+                state.get("history_context", ""),
+            )
+            if part
         )
+        decisions = engine.decide(state["state_text"], questions, context=context)
         sink.emit(
             RunEvent(
                 type="decision_made",
@@ -306,6 +330,39 @@ def build_graph(
         received_at = ticket.received_at or format_timestamp(
             datetime.fromtimestamp(state.get("started_at", time.time()), timezone.utc)
         )
+        # Customer history (dossier.py): the summary the service
+        # computed over the customer's prior records, plus what this
+        # backend did with the block — the reopen idiom, stated on
+        # the record either way. History informs; composition below
+        # never reads it.
+        history_state = state.get("history") or {}
+        history_offered = bool(state.get("history_context"))
+        last_outcome = history_state.get("last_outcome") or {}
+        history_info = CustomerHistoryInfo(
+            customer_key=str(history_state.get("customer_key", "")),
+            context_provided=history_offered,
+            context_use=(
+                ""
+                if not history_offered
+                else "ignored_offline"
+                if meta["backend"] == "offline"
+                else "history_block"
+            ),
+            prior_tickets=int(history_state.get("prior_tickets", 0)),
+            decided=int(history_state.get("decided", 0)),
+            reopened=int(history_state.get("reopened", 0)),
+            outcomes_recorded=int(history_state.get("outcomes_recorded", 0)),
+            resolved_rate=history_state.get("resolved_rate"),
+            last_outcome_ticket_id=str(last_outcome.get("ticket_id", "")),
+            last_outcome_category=str(last_outcome.get("final_category", "")),
+            last_outcome_resolved=(
+                bool(last_outcome["resolved"]) if last_outcome else None
+            ),
+            flags=[
+                HistoryFlag.model_validate(flag)
+                for flag in history_state.get("flags", [])
+            ],
+        )
         result = TicketResult(
             ticket_id=ticket.ticket_id,
             status="awaiting_agent",
@@ -348,6 +405,7 @@ def build_graph(
                 else None
             ),
             thread_id=state.get("thread_id", ""),
+            history=history_info,
             external_action_taken=False,
             telemetry=telemetry,
         )
@@ -370,6 +428,23 @@ def build_graph(
             " (advisory only — never acted on)",
             "status: awaiting_agent — nothing sent to the customer",
         ]
+        if history_state:
+            if history_info.context_provided:
+                flag_names = ", ".join(
+                    flag.flag for flag in history_info.flags
+                )
+                details.append(
+                    f"customer history: {history_info.prior_tickets} prior "
+                    f"ticket(s), {history_info.decided} decided"
+                    + (f"; flags: {flag_names}" if flag_names else "; no flags")
+                    + f"; context: {history_info.context_use} "
+                    "(history informs — it never enters composition)"
+                )
+            else:
+                details.append(
+                    "customer history: first recorded contact — no prior "
+                    "tickets, no history context offered"
+                )
         if is_reopen:
             details.append(
                 f"reopen #{reopen['reopen_count']} of {reopen['prior_run_id']} "

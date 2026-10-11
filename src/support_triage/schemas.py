@@ -139,6 +139,55 @@ class ReopenInfo(BaseModel):
     template_suppressed: bool = True  # a reopen never gets the canned draft
 
 
+class HistoryFlag(BaseModel):
+    """One computed history fact about the customer (dossier.py).
+
+    A flag is arithmetic over the stored records, not a model
+    opinion: the category decided three times in ninety days, the
+    five contacts in thirty. It carries its evidence — the ticket
+    ids and the window — so the claim can be checked against the
+    dossier in one click. Flags are shown to agents and offered to
+    the decision call as context; they never enter composition.
+    """
+
+    flag: str = ""  # repeat_issue | frequent_contact
+    category: str = ""  # the repeated category (repeat_issue only)
+    count: int = 0
+    window_days: int = 0
+    ticket_ids: list[str] = Field(default_factory=list)
+    detail: str = ""
+
+
+class CustomerHistoryInfo(BaseModel):
+    """The customer history a run was triaged WITH (dossier.py).
+
+    Computed by the service from the customer's PRIOR stored
+    records, before this run existed, and recorded here so the
+    record shows what history the decision call was offered: the
+    counts, the flags, the last outcome, and — honestly, under the
+    reopen idiom — what the backend did with the block
+    (``context_use``: ``history_block`` when the LLM/Jev adapters
+    received it fenced, ``ignored_offline`` when the deterministic
+    backend accepted and deliberately unused it). The block itself
+    is counts and categories composed by code — never another
+    ticket's text. A first recorded contact carries
+    ``context_provided=False``: there was no history to offer.
+    """
+
+    customer_key: str = ""  # threads.customer_key of this run's intake
+    context_provided: bool = False  # prior records existed and a block was offered
+    context_use: str = ""  # history_block | ignored_offline | "" when not provided
+    prior_tickets: int = 0
+    decided: int = 0
+    reopened: int = 0
+    outcomes_recorded: int = 0
+    resolved_rate: Optional[float] = None  # withheld below the small-sample floor
+    last_outcome_ticket_id: str = ""
+    last_outcome_category: str = ""
+    last_outcome_resolved: Optional[bool] = None
+    flags: list[HistoryFlag] = Field(default_factory=list)
+
+
 class ThreadCorrection(BaseModel):
     """One operator correction to a run's computed thread grouping.
 
@@ -336,6 +385,11 @@ class TicketResult(BaseModel):
     decision_reason: str = ""
     outcome: Optional[AgentOutcome] = None  # agent's ground truth, once recorded
     reopen: Optional[ReopenInfo] = None  # set when this run reopens an earlier one
+    # Customer history (dossier.py): what the customer's prior
+    # records said when this run was triaged, and what the decision
+    # call did with the history block. Context for the human and
+    # the model — never an input to composition.
+    history: CustomerHistoryInfo = Field(default_factory=CustomerHistoryInfo)
     # Conversation thread (threads.py): runs from one customer about
     # one issue share an id — "thr-<root ticket id>". A label,
     # assigned at intake; it merges and alters nothing.

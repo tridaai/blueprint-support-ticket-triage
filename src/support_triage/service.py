@@ -23,7 +23,14 @@ never to the graph directly. The service:
   over decided runs, stores reviewers' per-family verdicts on the
   review record (never on the run's record), and serves the
   agreement report — the layer that grades the triage itself, where
-  calibration only ever graded outcomes.
+  calibration only ever graded outcomes;
+- knows the customer (dossier.py): before any run is triaged it
+  composes the customer-history block from the customer's prior
+  records — counts, categories, flags, the last outcome, never
+  another ticket's text — and offers it to the decision call as
+  port context under the reopen idiom; the history summary lands
+  on the run's record, and the dossier read model serves the whole
+  history per customer, flags and all, as a pure projection.
 """
 
 from __future__ import annotations
@@ -35,7 +42,7 @@ from datetime import datetime, timezone
 from langgraph.types import Command
 from pydantic import ValidationError
 
-from . import corrections, playbooks, threads, webhooks, workbench
+from . import corrections, dossier, playbooks, threads, webhooks, workbench
 from .composition import reopen_limit_in_force
 from .events import CollectingSink, EventBus, RunEvent
 from .graph import AgentRun, build_graph
@@ -165,6 +172,11 @@ class TriageService:
         else:
             thread_id = self._assign_thread(ticket)
             prior_context = ""
+        # Customer history (dossier.py): composed over the records
+        # stored BEFORE this run — the new ticket is not its own
+        # history. Offered on every run, reopens included (the
+        # chain's records are part of the customer's history too).
+        history = self._customer_history(ticket)
         sink.emit(RunEvent(type="run_started", ticket_id=ticket.ticket_id))
         try:
             final = graph.invoke(
@@ -174,6 +186,8 @@ class TriageService:
                     "trace": [],
                     "reopen": reopen or {},
                     "prior_context": prior_context,
+                    "history_context": history["context"],
+                    "history": history["summary"],
                     "thread_id": thread_id,
                 },
                 config,
@@ -661,6 +675,30 @@ class TriageService:
                 pass
         return None
 
+    def _customer_history(self, ticket: TicketInput) -> dict:
+        """The customer history for a ticket about to be triaged.
+
+        Computed over the records stored before this run (the new
+        ticket is never its own history): the summary the run's
+        record will carry, and the block text offered to the
+        decision call. A customer with no prior records — or no key
+        at all — gets an empty block: there is no history to offer,
+        and the record will say ``context_provided=False``.
+        """
+        key = threads.customer_key(ticket.sender_email, ticket.sender_name)
+        records = self.store.all_records()
+        keys = {r.ticket_id: self._customer_key_for(r) for r in records}
+        mine = dossier.customer_records(records, keys, key) if key else []
+        anchor = parse_timestamp(ticket.received_at) or datetime.now(timezone.utc)
+        summary = dossier.summarise_history(key, mine, anchor=anchor)
+        return {
+            "summary": {
+                **summary,
+                "flags": [flag.model_dump() for flag in summary["flags"]],
+            },
+            "context": dossier.compose_history_block(summary) if mine else "",
+        }
+
     def _assign_thread(self, ticket: TicketInput) -> str:
         """Thread assignment for a fresh run, over the stored runs."""
         candidates = []
@@ -724,6 +762,35 @@ class TriageService:
         if record is None:
             raise KeyError(f"unknown ticket {ticket_id!r}")
         return self.get_thread(corrections.effective_thread_id(record))
+
+    # -- customer dossier (dossier.py) -------------------------------------
+
+    def customer_dossier(self, customer_key: str) -> dict:
+        """One customer's dossier: every ticket, the counts, the
+        outcome history, their threads under the effective grouping,
+        and the history flags with their evidence.
+
+        A pure projection over the stored records — computing it
+        mutates nothing. An unknown key (no records resolve to it,
+        or the empty "we don't know who this is" key) is a KeyError,
+        never an empty dossier dressed as knowledge.
+        """
+        key = (customer_key or "").strip()
+        if not key:
+            raise KeyError("an unknown customer has no dossier")
+        records = self.store.all_records()
+        keys = {r.ticket_id: self._customer_key_for(r) for r in records}
+        if key not in set(keys.values()):
+            raise KeyError(f"unknown customer {key!r}")
+        inputs = {r.ticket_id: self._stored_input(r.ticket_id) for r in records}
+        return dossier.build_dossier(key, records, keys, inputs)
+
+    def dossier_for_run(self, ticket_id: str) -> dict:
+        """The dossier of the customer behind one stored run."""
+        record = self.store.get(ticket_id)
+        if record is None:
+            raise KeyError(f"unknown ticket {ticket_id!r}")
+        return self.customer_dossier(self._customer_key_for(record))
 
     # -- operator corrections (threads + confirmed duplicates) --------------
 
