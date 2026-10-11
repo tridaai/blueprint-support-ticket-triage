@@ -1,6 +1,6 @@
 """Golden routing eval: known tickets in, routing truth checked.
 
-Fifty-one synthetic tickets with authored expectations — category,
+Fifty-five synthetic tickets with authored expectations — category,
 queue, priority band, and the five safety/engineering verify flags.
 (36 through round 2; round 3 added multi-issue tickets, three more
 injection phrasings, a calm ticket that must stay low, a repeat
@@ -11,7 +11,11 @@ that hits the reopen limit and goes to human review — and a thread
 near-miss that must stay in its own thread; the operator-correction
 round added the correction cases — a computed thread pair an
 operator splits, a duplicate an operator confirms into the
-calibration accounting, and the correction refusals.)
+calibration accounting, and the correction refusals; the workbench
+round added the workbench cases — resolution knowledge over seeded
+neighbours with outcomes, the small-sample withholding, the
+playbook overlay actions and refusals, and the working-note draft
+carrying the routing reason verbatim.)
 Each case runs the full pipeline (screen → duplicate → one decision
 call → composition → guardrails) through a fresh service, on the
 deterministic offline backend by default, so the gate is hermetic:
@@ -28,6 +32,7 @@ from __future__ import annotations
 
 import json
 import sys
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
@@ -249,6 +254,143 @@ def check_operator_case(service: TriageService, case: dict) -> list[str]:
     return failures
 
 
+def _record_eval_outcome(service: TriageService, ticket_id: str, outcome: dict) -> None:
+    service.record_outcome(
+        ticket_id,
+        AgentOutcome(
+            final_category=outcome.get("final_category", ""),
+            final_queue=outcome.get("final_queue", ""),
+            resolved=bool(outcome.get("resolved", False)),
+            recorded_by=outcome.get("by", "eval-agent"),
+            resolution_summary=outcome.get("resolution_summary", ""),
+        ),
+    )
+
+
+def _apply_workbench_action(service: TriageService, ticket_id: str, action: dict) -> list[str]:
+    """One declared workbench action; `expect_error` names the
+    refusal a correct implementation must raise (substring)."""
+    kind = action["type"]
+    actor = action.get("actor", "eval-agent")
+    expect_error = action.get("expect_error")
+    try:
+        if kind == "check_step":
+            service.check_playbook_step(ticket_id, action["step_id"], actor=actor)
+        elif kind == "uncheck_step":
+            service.check_playbook_step(ticket_id, action["step_id"], actor=actor, checked=False)
+        elif kind == "mark_na":
+            service.mark_playbook_na(
+                ticket_id, actor=actor, reason=action.get("reason", "eval mark")
+            )
+        elif kind == "lift_na":
+            service.lift_playbook_na(ticket_id, actor=actor)
+        elif kind == "save_note":
+            service.save_working_note(ticket_id, text=action["text"], actor=actor)
+        else:
+            return [f"unknown workbench action {kind!r}"]
+    except Exception as exc:  # a refusal is a ValueError/KeyError by design
+        if expect_error and expect_error in str(exc):
+            return []
+        return [f"workbench action {kind} raised unexpectedly: {exc}"]
+    if expect_error:
+        return [
+            f"workbench action {kind} should have been refused "
+            f"({expect_error!r}) but succeeded"
+        ]
+    return []
+
+
+def check_workbench_case(service: TriageService, case: dict) -> list[str]:
+    """A workbench case (workbench.py).
+
+    Seeds the case's ``neighbours`` first — similar tickets, some
+    with recorded outcomes at authored intake ages (``age_hours``
+    becomes a received_at that many hours before now, so the
+    intake-to-outcome elapsed is deterministic) — plus any
+    ``extra_tickets``; then runs the main ticket through the normal
+    pipeline checks and judges the workbench: the knowledge
+    aggregate over the neighbours, the declared workbench actions
+    (each succeeding or raising its refusal), the playbook state
+    they leave, and the saved note.
+    """
+    failures: list[str] = []
+    for spec in case.get("neighbours", []):
+        ticket = dict(spec["ticket"])
+        if "age_hours" in spec:
+            moment = datetime.now(timezone.utc) - timedelta(hours=spec["age_hours"])
+            ticket["received_at"] = moment.strftime("%Y-%m-%dT%H:%M:%SZ")
+        service.run_ticket(TicketInput.model_validate(ticket))
+        if spec.get("outcome"):
+            _record_eval_outcome(service, ticket["ticket_id"], spec["outcome"])
+    for extra in case.get("extra_tickets", []):
+        service.run_ticket(TicketInput.model_validate(extra))
+
+    result, chain_failures = run_case(service, case)
+    failures += chain_failures + check_case(case, result)
+
+    exp = case.get("expect_workbench") or {}
+    if exp:
+        wb = service.workbench(result.ticket_id)
+        agg = wb["knowledge"]["aggregate"]
+        for key in ("with_outcome", "without_outcome", "resolved_count", "similar_total"):
+            if key in exp and agg[key] != exp[key]:
+                failures.append(f"knowledge {key}: expected {exp[key]}, got {agg[key]}")
+        if "resolved_rate" in exp:
+            got = agg["resolved_rate"]
+            if exp["resolved_rate"] is None and got is not None:
+                failures.append(f"knowledge rate should be withheld, got {got}")
+            elif exp["resolved_rate"] is not None and (
+                got is None or abs(got - exp["resolved_rate"]) > 1e-4
+            ):
+                failures.append(
+                    f"knowledge rate: expected {exp['resolved_rate']}, got {got}"
+                )
+        if "median_hours" in exp:
+            got = agg["median_hours_from_intake"]
+            if exp["median_hours"] is None and got is not None:
+                failures.append(f"knowledge median should be withheld, got {got}")
+            elif exp["median_hours"] is not None and (
+                got is None or abs(got - exp["median_hours"]) > 0.25
+            ):
+                failures.append(
+                    f"knowledge median: expected ~{exp['median_hours']}h, got {got}"
+                )
+        if exp.get("note_contains") and exp["note_contains"] not in agg["note"]:
+            failures.append(f"knowledge note does not say {exp['note_contains']!r}: {agg['note']}")
+        if exp.get("note_draft_contains_routing_reason"):
+            if result.composition.routing_reason not in wb["working_note"]["draft"]:
+                failures.append("the working-note draft lacks the routing reason verbatim")
+    for action in case.get("workbench_actions", []):
+        failures += _apply_workbench_action(service, result.ticket_id, action)
+    playbook_exp = case.get("expect_playbook")
+    if playbook_exp is not None:
+        view = service.workbench_playbook(result.ticket_id)
+        if view["available"] != playbook_exp.get("available", True):
+            failures.append(
+                f"playbook availability: expected {playbook_exp.get('available', True)}, "
+                f"got {view['available']}"
+            )
+        checked = sorted(s["id"] for s in view["steps"] if s["checked"])
+        if checked != sorted(playbook_exp.get("checked", [])):
+            failures.append(
+                f"playbook checked steps: expected {sorted(playbook_exp.get('checked', []))}, "
+                f"got {checked}"
+            )
+        if (view["not_applicable"] is None) == bool(playbook_exp.get("not_applicable")):
+            failures.append("playbook not-applicable state does not match the expectation")
+    if case.get("expect_no_playbook_ticket"):
+        view = service.workbench_playbook(case["expect_no_playbook_ticket"])
+        if view["available"]:
+            failures.append(
+                f"{case['expect_no_playbook_ticket']} unexpectedly has a playbook"
+            )
+    if case.get("expect_saved_note"):
+        record = service.get_record(result.ticket_id)
+        if record.working_note is None or record.working_note.text != case["expect_saved_note"]:
+            failures.append("the saved working note is not on the record as declared")
+    return failures
+
+
 def check_case(case: dict, result) -> list[str]:
     expected = case["expected"]
     failures: list[str] = []
@@ -313,6 +455,8 @@ def main() -> int:
         # only a case's own `previous` ticket may link to it.
         if "operator_actions" in case:
             failures = check_operator_case(fresh_service(), case)
+        elif "neighbours" in case or "workbench_actions" in case:
+            failures = check_workbench_case(fresh_service(), case)
         elif "thread_pair" in case:
             failures = check_thread_case(fresh_service(), case)
         else:
