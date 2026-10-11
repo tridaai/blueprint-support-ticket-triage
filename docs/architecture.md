@@ -501,6 +501,55 @@ verdicts are recorded. Storage follows the run-errors precedent
 InMemory doubles stay honest and the migration carries the
 production tables.
 
+**Inter-rater reliability** (round 10) asks the report's second
+question — whether the reviewers agree with *each other* —
+because reviewer-vs-agent agreement built on an unclear standard
+is noise with a percentage sign. The mechanism is an **overlap
+set** on the sample: two named reviewers and a stated count (or
+fraction) of the drawn runs. The assignment is not a second
+draw: `draw_sample` continues the same `random.Random(seed)`
+stream that shuffled the strata into the overlap pick, so the
+whole sample — draw plus assignment — stays a pure function of
+(records, seed, size, flags, overlap request), and the golden
+pack pins the exact assigned ids and their reproduction on
+redraw. A sample created without an overlap consumes no extra
+randomness and draws byte-identically to the pre-overlap sampler.
+The overlap rides the `ReviewSample` payload (`overlap` dict:
+reviewers, the request as stated, the resolved count, the run
+ids in draw order) — no new migration, since the review tables
+store payloads.
+
+Enforcement draws its line where the assignment exists. On an
+overlap run, `record_review_verdict` refuses anyone outside the
+named pair as a 409 conflict naming both reviewers — the paired
+measurement is only auditable if the pair is the pair. Off the
+overlap set nothing changes: any named reviewer may grade, once,
+exactly as round 8 pinned (the golden worlds rely on unpaired
+reviewers splitting a sample's runs). The assignment is a floor
+of responsibility for the overlap set, not a cage on the round.
+
+The math (`_inter_rater`, `_pair_stats`) pairs verdicts strictly
+inside one sample, between its two assigned reviewers, and only
+where both have graded — partial pairs are counted as partial,
+never silently completed or dropped. Per family and overall it
+reports the raw agreement rate (shown whenever pairs exist) and
+Cohen's kappa, computed from the two raters' marginals in
+`Fraction` arithmetic so the golden assertions are exact to the
+decimal, not float-adjacent. Two honesty rules mirror the rate
+floor's: kappa is withheld below ten completed pairs
+(`KAPPA_MIN_PAIRS` — the statistic divides by 1 − expected
+agreement and swings wildly on a handful), and when both
+marginals are degenerate — each rater said the same word on
+every paired run — expected agreement is 1, the correction has
+no denominator, and kappa is `None` with a no-variance reason:
+a raw rate of 1.0 with a null kappa is the true statement, and
+printing κ = 1.0 there would fabricate precision the data does
+not contain. Paired disagreements join the report with both
+verdicts and both notes side by side — deliberately a different
+list from the reviewer-vs-agent disagreements, because its
+reader is the calibration meeting and its subject is the
+standard, not the agent.
+
 ## The customer dossier
 
 `dossier.py` is the per-customer read over everything the rounds

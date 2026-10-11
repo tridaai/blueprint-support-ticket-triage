@@ -108,7 +108,7 @@ Or natively, offline, in about a minute:
 uv sync --extra dev        # or, without uv: make install-pip
 make demo                  # one ticket, traced end to end
 make test                  # 241 tests
-make evals                 # golden routing 61/61 · calibration gates pass
+make evals                 # golden routing 63/63 · calibration gates pass
 make serve                 # API + console on :8000
 ```
 
@@ -154,7 +154,7 @@ exists for tests and offline demos only. A deployment always sets
 
 Two packs, both deterministic offline:
 
-- **Golden routing set** (`evals/run_evals.py`) — 61 synthetic tickets
+- **Golden routing set** (`evals/run_evals.py`) — 63 synthetic tickets
   with authored category, queue, priority band, and safety flags —
   including the reopen cases (a reopened how_to that must not get a
   template draft, a floor-raised band, a chain that hits the reopen
@@ -169,8 +169,13 @@ Two packs, both deterministic offline:
   byte-identical across grading), and the dossier cases (a staged
   customer history whose flags fire with exact evidence at triage
   and in the dossier, a below-threshold customer with neither
-  flag, and a detach moving the ticket between thread rows).
-  Gate: ≥ 95%. Current: **61/61**.
+  flag, and a detach moving the ticket between thread rows), and
+  the inter-rater cases (an overlap draw asserted exactly with its
+  assignment, a third reviewer refused off the overlap set, and a
+  twelve-run double-graded world whose per-family kappas are
+  asserted to the decimal — including the family whose kappa is
+  honestly null).
+  Gate: ≥ 95%. Current: **63/63**.
 - **Calibration pack** (`evals/run_calibration.py`) — the headline
   eval for a decision system: reliability bins and Brier scores per
   question against the golden truths. Verify Briers ≤ 0.013, category
@@ -499,6 +504,34 @@ for the humans; the machinery's job is to make sure the
 conversation is about a fair sample. Reviewed runs carry their
 verdicts in the audit export's QA review block.
 
+### Inter-rater: do the reviewers agree with each other?
+
+Reviewer-vs-agent agreement is only meaningful if the reviewers
+agree with *each other*. If two trained reviewers grade the same
+triage differently, the standard itself is unclear and every score
+built on it is noise. So a sample can carry an **overlap set**: two
+named reviewers and a count (or fraction) of the drawn runs that
+both of them grade. The assignment is part of the seeded draw —
+the same stream that shuffled the strata picks the overlap runs —
+so it reproduces exactly and rides the sample record with both
+names. On overlap runs the assignment binds: only the named pair
+may grade them, and anyone else is refused by name. Everywhere
+else grading stays open, as it always was — the assignment is a
+floor of responsibility for the paired measurement, not a cage on
+the whole round.
+
+The report's `inter_rater` block computes, per family and overall,
+the raw agreement rate over the completed pairs and **Cohen's
+kappa** — the chance-corrected figure, from the two raters' own
+marginals. Kappa is withheld below ten completed pairs (the raw
+rate still shows), and where both raters said the same word on
+every paired run it is honestly *undefined* — reported as null
+with the no-variance reason, never dressed up as a perfect 1.0.
+Paired disagreements are listed with both verdicts and both notes
+side by side: that list is the calibration meeting's agenda,
+because the families where raters split are where the standard is
+ambiguous.
+
 ## The customer dossier: the triage knows who is writing
 
 Everything above answers per-ticket. The agent holding a ticket
@@ -651,7 +684,7 @@ src/support_triage/
   corrections.py  operator overlay: thread corrections + confirmed duplicates
   playbooks.py    authored category playbooks + the check-off overlay reads
   workbench.py    resolution knowledge, the working-note composer, refusals
-  reviews.py      QA review: the seeded sampler, verdicts, agreement report
+  reviews.py      QA review: the seeded sampler, verdicts, agreement report, inter-rater kappa
   dossier.py      the customer dossier: history, flags, the context block
   compare.py      one ticket under several backends, diffed, unqueued
   sla.py          the deterministic SLA clock (band targets vs age)
