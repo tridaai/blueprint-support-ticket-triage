@@ -1,7 +1,7 @@
 """The triage question set: the decomposed decisions one ticket needs.
 
 The set is fixed by the blueprint (a deployment retunes rubrics and
-thresholds, not the vocabulary). Twelve questions, one decision call:
+thresholds, not the vocabulary). Eleven questions, one decision call:
 
 - two **choice** questions place the ticket (category, product area);
 - four **score** questions grade it (urgency, sentiment, churn risk,

@@ -19,7 +19,7 @@ Three question primitives cover the triage question set:
   probability of true, carried as a two-way distribution.
 
 All questions in a set are evaluated in ONE decision call against the
-same state, so a set of twelve questions costs one round trip — that,
+same state, so a set of questions costs one round trip — that,
 plus calibration, is the entire point of the shape.
 
 Validation lives here, not in the backends: :func:`build_decision_set`
