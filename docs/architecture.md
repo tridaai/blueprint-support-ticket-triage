@@ -222,6 +222,50 @@ verbatim. The feature's invariant is structural: the module has no
 store handle and no write path, the endpoint is a GET, and the
 ticket's record is byte-identical after a suggestion is served.
 
+## Policy replay and audit export
+
+Round 5 adds two reads over the same records, both built so the
+hypothetical can never touch the real.
+
+**Policy impact replay** (`replay.py`) starts from a small,
+deliberate refactor: `compose()` and `run_guardrails()` take the
+policy constants they read — priority weights, outage boost,
+category forcing threshold — as keyword-only overrides whose
+defaults are the live values, so every existing caller is
+unchanged and the replay runs the *same* code the pipeline runs,
+not a re-implementation of it. A replay rebuilds each record's
+answers into a `DecisionSet` (the record carries kind, value,
+distribution and confidence — everything composition reads) and
+compares the recomputed consequence against the stored one. A run
+*moves* on the three dimensions an operator acts on — queue,
+priority band, guardrail outcome; a score change inside a band is
+counted and shown, but is not a move. The invariants are
+structural, as with assignment suggestions: the replay module
+receives a list of records, never a store handle, and the service
+passes `all_records()` — there is no write path to misuse, a test
+pins the records byte-identical across an endpoint replay, and a
+second test swaps in an engine that raises if called, proving the
+decision layer is never re-asked. Records without the full answer
+set (never produced by the pipeline; possible in a hand-built
+store) are skipped and named in the report rather than replayed
+on partial evidence. Invalid hypotheticals — weights that don't
+name exactly the five terms, don't sum to 1, or go negative; a
+threshold outside [0, 1] — are 422s with the reason spelled out.
+
+**Run audit export** (`exports.py`) renders one run as a portable
+document. The assembly is one dict, built in code from the stored
+record (plus the stored intake payload, the SLA clock at export
+time, and the drift watch's current per-question rows for the
+questions this run answered, assembled by the service from the
+same `drift_report` the dashboard reads); the JSON endpoint
+returns it and `?format=text` renders it, so the two formats
+cannot disagree — a test asserts the key facts in both. The
+composition section is a trace, not a summary: each formula term
+carries its basis (which answer, normalised how), its input, its
+weight and its points, and a `score_check` boolean reconciles the
+term total plus boost against the recorded score — an export that
+doesn't add up says so on its face instead of rounding quietly.
+
 ## Events, comparisons, and SLA clocks
 
 **The event bus** (`events.py: EventBus`, owned by the service) is

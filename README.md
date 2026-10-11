@@ -105,7 +105,7 @@ Or natively, offline, in about a minute:
 ```bash
 uv sync --extra dev        # or, without uv: make install-pip
 make demo                  # one ticket, traced end to end
-make test                  # 157 tests
+make test                  # 202 tests
 make evals                 # golden routing 44/44 · calibration gates pass
 make serve                 # API + console on :8000
 ```
@@ -249,6 +249,46 @@ the system is still the human's `POST /tickets/{id}/assign`, and
 the console's "use suggestion" button merely fills in the gate
 form's assignee field for the human to submit.
 
+## Policy impact replay and the audit export
+
+Two surfaces close the policy loop — one looks back at what a
+different policy would have done, the other packages a single run
+for whoever has to answer for it:
+
+- **Policy impact replay** — `POST /api/policy/replay` takes a
+  hypothetical policy change (the category-confidence forcing
+  threshold, the priority weights, the outage boost on or off —
+  any subset; omitted fields keep the live values) and replays
+  **every stored run**, decided ones included: the recorded
+  question answers are rebuilt into a decision set and re-composed
+  by the same composition and guardrail code the pipeline runs,
+  under the hypothetical constants. The report names each moved
+  run with its before/after queue, priority band, score and
+  guardrail outcome, plus aggregates — moved total, counts by
+  queue pair, by band pair, and by guardrail flip. Decisions are
+  inputs: no backend is ever called, and nothing is written —
+  every record is byte-identical after a replay (pinned by test).
+  A record that lacks the full answer set is skipped and named,
+  never guessed at. The Dashboards policy panel carries the
+  replay beside the browser what-if it grows out of: the what-if
+  still sketches today's open queue client-side, while the replay
+  is the server-side version over all of history, weights
+  included.
+- **Run audit export** — `GET /api/runs/{id}/export` renders one
+  run as a single portable document: JSON, or plain text with
+  `?format=text` (the text renders the same assembly, so the two
+  agree on the facts). Intake with the injection screen's
+  verdict, all eleven answers with confidences and full
+  distributions, the composition trace (the weights in force,
+  the term-by-term score math with a reconciliation check, the
+  routing matrix cell and any override that fired), the
+  guardrail verdicts check by check, the SLA clock at export
+  time, the drift watch's current reading on the questions this
+  run used, the agent's decision, and the recorded outcome when
+  one exists. Composed in code from the stored record — no model
+  text anywhere in it. The console's decision record carries
+  Export buttons for both formats.
+
 ## Batch, compare, similar tickets, SLA clocks, events, webhooks
 
 The operations surface around the pipeline:
@@ -344,6 +384,8 @@ src/support_triage/
   drift.py        rolling-window drift watch vs the eval baseline
   roster.py       the agent roster (queues covered, skill tags)
   assignment.py   advisory assignee ranking — reasons printed, never writes
+  replay.py       policy impact replay over stored runs — never writes
+  exports.py      one run as a portable audit document (JSON + text)
   compare.py      one ticket under several backends, diffed, unqueued
   sla.py          the deterministic SLA clock (band targets vs age)
   events.py       run events + the lifecycle bus behind /api/events
