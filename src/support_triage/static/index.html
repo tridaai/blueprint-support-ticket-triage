@@ -106,6 +106,7 @@
   <button id="tab-dashboards">Dashboards</button>
   <button id="tab-compare">Compare backends</button>
   <button id="tab-threads">Threads</button>
+  <button id="tab-qa">QA review</button>
 </nav>
 
 <main id="view-console">
@@ -286,6 +287,40 @@
     </div>
     <h2 style="margin-top:18px">Thread detail</h2>
     <div id="thread-detail" class="empty">Pick a thread above to see its chain — every run in order, each with its recorded outcome.</div>
+  </section>
+</main>
+
+<main id="view-qa" style="display:none; grid-template-columns:1fr">
+  <section>
+    <h2>QA review — grade the triage, not the outcome</h2>
+    <p class="note">Calibration (Dashboards) scores the recorded probabilities against outcomes. This view grades the <strong>decisions</strong>: a seeded, stratified sample of decided runs — queue × priority band, in proportion — that a reviewer grades per family (category, priority drivers, routing, verify) plus overall. Confirmed duplicates never draw; runs already reviewed sit out unless you switch the exclusion off. Verdicts live on the review record: grading never edits a run, and the agreement report below tunes nothing — it is a read model for a human conversation.</p>
+    <div class="row">
+      <label for="qa-size">Sample size</label>
+      <input type="number" id="qa-size" value="10" min="1" style="width:90px">
+      <label for="qa-seed">Seed</label>
+      <input type="number" id="qa-seed" value="1" style="width:90px">
+      <label for="qa-by">Drawn by</label>
+      <input type="text" id="qa-by" placeholder="e.g. QA Lead">
+      <label style="margin:0"><input type="checkbox" id="qa-exclude" checked style="width:auto"> exclude previously reviewed</label>
+      <button class="primary" id="qa-draw">Draw sample</button>
+      <span class="note" id="qa-draw-status"></span>
+    </div>
+    <div id="qa-sample" style="margin-top:12px" class="empty">No sample drawn yet in this view.</div>
+    <div class="row" style="margin-top:10px">
+      <label for="qa-pick">Sample</label>
+      <select id="qa-pick"></select>
+      <button id="qa-load">Load</button>
+      <button id="qa-refresh">Refresh list</button>
+    </div>
+    <h2 style="margin-top:18px">Grade a sampled run</h2>
+    <div id="qa-grade" class="empty">Load a sample to grade its runs.</div>
+    <h2 style="margin-top:18px">Agreement report</h2>
+    <div class="row">
+      <button class="primary" id="qa-report-run">Report for this sample</button>
+      <button id="qa-report-all">Report over all samples</button>
+      <span class="note" id="qa-report-status"></span>
+    </div>
+    <div id="qa-report" style="margin-top:10px" class="empty">No report yet.</div>
   </section>
 </main>
 
@@ -1059,6 +1094,160 @@ function subscribeEvents() {
   } catch (e) { startPolling(); }
 }
 
+// ---------------------------------------------------------------- QA review
+let QA_SAMPLE = null;  // the loaded sample detail ({sample, verdicts, ...})
+
+function qaPct(rate) { return rate === null || rate === undefined ? '<span class="note">withheld (too few verdicts)</span>' : (rate * 100).toFixed(1) + '%'; }
+
+function renderQaSample(detail) {
+  QA_SAMPLE = detail;
+  const s = detail.sample;
+  const pop = s.population || {};
+  const graded = new Set((detail.verdicts || []).map(v => v.ticket_id + '|' + v.reviewer));
+  const gradedRuns = new Set((detail.verdicts || []).map(v => v.ticket_id));
+  const strata = (s.strata || []).map(r => `<tr><td>${esc(r.queue)}</td><td>${esc(r.priority_band)}</td><td>${r.eligible}</td><td>${r.sampled}</td></tr>`).join('');
+  $('qa-sample').className = '';
+  $('qa-sample').innerHTML = `
+    <p style="margin:0 0 6px"><strong>${esc(s.sample_id)}</strong> — drawn by ${esc(s.created_by)} at ${esc(s.created_at)} · seed ${s.seed} · requested ${s.size_requested}
+    <br><span class="note">${esc(s.note)}</span></p>
+    <table><tr><th>Queue</th><th>Band</th><th>Eligible</th><th>Sampled</th></tr>${strata}</table>
+    <p class="note" style="margin-top:6px">Population: ${pop.decided_total} decided · eligible ${pop.eligible}
+    · excluded duplicates: ${(pop.excluded_duplicates || []).map(esc).join(', ') || 'none'}
+    · excluded previously reviewed: ${(pop.excluded_previously_reviewed || []).map(esc).join(', ') || 'none'}
+    · verdicted runs so far: ${detail.verdicted_runs} of ${s.run_ids.length}</p>`;
+  const famSelect = (fam, label) => `
+    <label for="qa-fam-${fam}">${label}</label>
+    <select id="qa-fam-${fam}"><option value="agree">agree</option><option value="disagree">disagree</option></select>`;
+  $('qa-grade').className = '';
+  $('qa-grade').innerHTML = `
+    <div class="row">
+      <label for="qa-run">Run</label>
+      <select id="qa-run">${s.run_ids.map(id => `<option value="${esc(id)}">${esc(id)}${gradedRuns.has(id) ? ' (graded)' : ''}</option>`).join('')}</select>
+      <label for="qa-reviewer">Reviewer</label>
+      <input type="text" id="qa-reviewer" placeholder="e.g. R. Reviewer">
+    </div>
+    <div class="row" style="margin-top:8px">
+      ${famSelect('category', 'Category')}
+      ${famSelect('priority_drivers', 'Priority drivers')}
+      ${famSelect('routing', 'Routing')}
+      ${famSelect('verify', 'Verify')}
+      <label for="qa-fam-overall">Overall</label>
+      <select id="qa-fam-overall"><option value="agree">agree</option><option value="disagree">disagree</option></select>
+    </div>
+    <div class="row" style="margin-top:8px">
+      <label for="qa-note">Note</label>
+      <input type="text" id="qa-note" placeholder="why — the disagreement list carries it" style="min-width:320px">
+      <button class="primary" id="qa-verdict">Record verdict</button>
+      <span class="note" id="qa-verdict-status"></span>
+    </div>
+    <p class="note" style="margin-top:6px">One verdict per reviewer per run — a verdict is final; another reviewer may still grade the same run. Click a run id in the queue (console view) to re-read its decision record before grading.</p>`;
+  $('qa-verdict').onclick = submitQaVerdict;
+}
+
+async function submitQaVerdict() {
+  if (!QA_SAMPLE) return;
+  const reviewer = $('qa-reviewer').value.trim();
+  if (!reviewer) { $('qa-verdict-status').textContent = 'a verdict names its reviewer'; return; }
+  const families = {};
+  ['category', 'priority_drivers', 'routing', 'verify'].forEach(f => families[f] = $('qa-fam-' + f).value);
+  $('qa-verdict-status').textContent = 'recording…';
+  try {
+    const res = await fetch(`/api/reviews/samples/${encodeURIComponent(QA_SAMPLE.sample.sample_id)}/verdicts`, {
+      method: 'POST', headers: headers(),
+      body: JSON.stringify({
+        ticket_id: $('qa-run').value, reviewer, families,
+        overall: $('qa-fam-overall').value, note: $('qa-note').value.trim(),
+      }),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.detail || res.statusText);
+    }
+    $('qa-verdict-status').textContent = 'verdict recorded — the run itself is untouched';
+    await loadQaSample(QA_SAMPLE.sample.sample_id);
+  } catch (e) { $('qa-verdict-status').textContent = 'verdict failed: ' + e.message; }
+}
+
+async function loadQaSample(sampleId) {
+  try {
+    const res = await fetch(`/api/reviews/samples/${encodeURIComponent(sampleId)}`, {headers: headers()});
+    if (!res.ok) throw new Error('unavailable');
+    renderQaSample(await res.json());
+  } catch (e) {
+    $('qa-sample').className = 'empty';
+    $('qa-sample').textContent = 'Sample unavailable.';
+  }
+}
+
+async function loadQaSamples(selectId) {
+  try {
+    const res = await fetch('/api/reviews/samples', {headers: headers()});
+    if (!res.ok) throw new Error('unavailable');
+    const data = await res.json();
+    const pick = $('qa-pick');
+    pick.innerHTML = (data.samples || []).map(s => `<option value="${esc(s.sample_id)}">${esc(s.sample_id)} — ${s.run_ids.length} runs · seed ${s.seed} · by ${esc(s.created_by)}</option>`).join('');
+    const wanted = selectId || (QA_SAMPLE && QA_SAMPLE.sample.sample_id) || (data.samples.length && data.samples[data.samples.length - 1].sample_id);
+    if (wanted && [...pick.options].some(o => o.value === wanted)) {
+      pick.value = wanted;
+      await loadQaSample(wanted);
+    }
+  } catch (e) { /* the QA panels keep their empty states offline */ }
+}
+
+async function drawQaSample() {
+  const by = $('qa-by').value.trim();
+  if (!by) { $('qa-draw-status').textContent = 'a sample names who drew it'; return; }
+  $('qa-draw-status').textContent = 'drawing…';
+  try {
+    const res = await fetch('/api/reviews/samples', {
+      method: 'POST', headers: headers(),
+      body: JSON.stringify({
+        size: parseInt($('qa-size').value, 10) || 0,
+        seed: parseInt($('qa-seed').value, 10) || 0,
+        created_by: by,
+        exclude_previously_reviewed: $('qa-exclude').checked,
+      }),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.detail || res.statusText);
+    }
+    const sample = await res.json();
+    $('qa-draw-status').textContent = `${sample.sample_id} drawn — ${sample.run_ids.length} runs`;
+    await loadQaSamples(sample.sample_id);
+  } catch (e) { $('qa-draw-status').textContent = 'draw failed: ' + e.message; }
+}
+
+async function runQaReport(all) {
+  $('qa-report-status').textContent = 'computing…';
+  try {
+    const url = all || !QA_SAMPLE
+      ? '/api/reviews/report'
+      : `/api/reviews/report?samples=${encodeURIComponent(QA_SAMPLE.sample.sample_id)}`;
+    const res = await fetch(url, {headers: headers()});
+    if (!res.ok) throw new Error('unavailable');
+    const r = await res.json();
+    const famRows = Object.entries(r.families).map(([fam, row]) => `<tr><td>${esc(fam)}</td><td>${row.verdicts}</td><td>${row.agree}</td><td>${qaPct(row.rate)}</td></tr>`).join('');
+    const backendRows = Object.entries(r.by_backend || {}).map(([b, row]) => `<tr><td>${esc(b)}</td><td>${row.verdicts}</td><td>${row.overall_agree}</td><td>${qaPct(row.overall_rate)}</td></tr>`).join('') || '<tr><td colspan="4" class="note">no verdicts yet</td></tr>';
+    const disagreements = (r.disagreements || []).map(d => `<tr><td>${esc(d.ticket_id)}</td><td>${esc(d.family)}</td><td>${esc(d.reviewer)}</td><td>${esc(d.note)}</td></tr>`).join('') || '<tr><td colspan="4" class="note">no disagreements recorded</td></tr>';
+    $('qa-report').className = '';
+    $('qa-report').innerHTML = `
+      <p style="margin:0 0 6px"><strong>Overall agreement: ${qaPct(r.overall_rate)}</strong> — ${r.overall_agree} of ${r.verdicts} verdicts agree, over ${r.verdicted_runs} graded run(s) in ${(r.samples || []).length} sample(s). <span class="note">${esc(r.note)}</span></p>
+      <table><tr><th>Family</th><th>Verdicts</th><th>Agree</th><th>Rate</th></tr>${famRows}</table>
+      <p style="margin:12px 0 6px"><strong>By backend</strong></p>
+      <table><tr><th>Backend</th><th>Verdicts</th><th>Overall agree</th><th>Rate</th></tr>${backendRows}</table>
+      <p style="margin:12px 0 6px"><strong>Disagreements</strong></p>
+      <table><tr><th>Run</th><th>Family</th><th>Reviewer</th><th>Note</th></tr>${disagreements}</table>`;
+    $('qa-report-status').textContent = '';
+  } catch (e) { $('qa-report-status').textContent = 'report failed: ' + e.message; }
+}
+
+$('qa-draw').onclick = drawQaSample;
+$('qa-refresh').onclick = () => loadQaSamples();
+$('qa-load').onclick = () => { const id = $('qa-pick').value; if (id) loadQaSample(id); };
+$('qa-report-run').onclick = () => runQaReport(false);
+$('qa-report-all').onclick = () => runQaReport(true);
+
 // ---------------------------------------------------------------- views
 let dashboardsLoaded = false;
 function showView(name) {
@@ -1066,18 +1255,22 @@ function showView(name) {
   $('view-dashboards').style.display = name === 'dashboards' ? '' : 'none';
   $('view-compare').style.display = name === 'compare' ? '' : 'none';
   $('view-threads').style.display = name === 'threads' ? '' : 'none';
+  $('view-qa').style.display = name === 'qa' ? '' : 'none';
   $('tab-console').classList.toggle('active', name === 'console');
   $('tab-dashboards').classList.toggle('active', name === 'dashboards');
   $('tab-compare').classList.toggle('active', name === 'compare');
   $('tab-threads').classList.toggle('active', name === 'threads');
+  $('tab-qa').classList.toggle('active', name === 'qa');
   if (name === 'dashboards' && !dashboardsLoaded) loadDashboards();
   if (name === 'compare' && !$('cmp-json').value) $('cmp-json').value = $('json').value;
   if (name === 'threads') loadThreads();
+  if (name === 'qa') loadQaSamples();
 }
 $('tab-console').onclick = () => showView('console');
 $('tab-dashboards').onclick = () => showView('dashboards');
 $('tab-compare').onclick = () => showView('compare');
 $('tab-threads').onclick = () => showView('threads');
+$('tab-qa').onclick = () => showView('qa');
 $('dash-refresh').onclick = loadDashboards;
 
 // ---------------------------------------------------------------- policy

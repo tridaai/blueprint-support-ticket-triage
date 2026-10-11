@@ -60,6 +60,16 @@ every route delegates, none re-implements. Notable behaviour:
   record the agent's playbook progress, and ``POST
   .../workbench/note`` saves their edited note — overlays on the
   record, all of them; the triage itself is never touched;
+- the QA review layer (reviews.py): ``POST /api/reviews/samples``
+  draws a seeded, stratified sample over the decided runs (queue ×
+  priority band; confirmed duplicates never draw; previously
+  reviewed runs excluded unless the request says otherwise), ``GET
+  /api/reviews/samples`` / ``/{id}`` list and read samples with
+  their verdicts, ``POST /api/reviews/samples/{id}/verdicts``
+  records a reviewer's per-family grading (the run's record is
+  never edited), and ``GET /api/reviews/report`` serves the
+  agreement report — per-family rates, per-backend split, and the
+  disagreement list, with rates withheld below the verdict floor;
 - ``/readiness`` fails (503) when PostgreSQL is configured but
   unreachable, and says honestly when the in-memory test doubles are
   in use (records lost on restart — fine for a look, not for work).
@@ -1085,6 +1095,132 @@ def save_working_note(ticket_id: str, body: WorkingNoteRequest, request: Request
     except (KeyError, ValueError) as exc:
         _workbench_http(exc)
     return record.model_dump()
+
+
+# ---------------------------------------------------------------------------
+# QA review (samples, verdicts, agreement report)
+# ---------------------------------------------------------------------------
+
+
+class ReviewSampleRequest(BaseModel):
+    size: int  # runs to draw
+    seed: int = 0  # the draw's seed — recorded on the sample
+    created_by: str = ""  # who drew the sample
+    exclude_previously_reviewed: bool = True
+
+
+class ReviewVerdictRequest(BaseModel):
+    ticket_id: str  # a run the sample drew
+    reviewer: str = ""  # who is grading it
+    families: dict[str, str] = {}  # family -> agree | disagree (all four)
+    overall: str = ""  # agree | disagree
+    note: str = ""
+
+
+def _review_http(exc: Exception):
+    """Map a review refusal onto its status: KeyError → 404,
+    ReviewError → its own (409 conflict / 422 invalid)."""
+    from .reviews import ReviewError
+
+    if isinstance(exc, KeyError):
+        raise HTTPException(status_code=404, detail=exc.args[0] if exc.args else str(exc))
+    if isinstance(exc, ReviewError):
+        raise HTTPException(status_code=exc.http_status, detail=str(exc))
+    raise exc
+
+
+@app.post("/api/reviews/samples", status_code=201)
+def create_review_sample(body: ReviewSampleRequest, request: Request):
+    """Draw a QA review sample over the decided runs (reviews.py).
+
+    Stratified by queue and priority band, seeded and reproducible;
+    confirmed duplicates never draw, and runs already reviewed in
+    an earlier sample sit out unless ``exclude_previously_reviewed``
+    is false. The sample is stored (seed, strata, run ids,
+    exclusions by name) so the round is auditable and re-runnable.
+    The response is the sample record.
+    """
+    require_api_key(request)
+    if not body.created_by.strip():
+        raise HTTPException(
+            status_code=422, detail="created_by is required — a sample names who drew it"
+        )
+    try:
+        sample = get_service().create_review_sample(
+            size=body.size,
+            seed=body.seed,
+            created_by=body.created_by.strip(),
+            exclude_previously_reviewed=body.exclude_previously_reviewed,
+        )
+    except ValueError as exc:
+        _review_http(exc)
+    return sample.model_dump()
+
+
+@app.get("/api/reviews/samples")
+def list_review_samples():
+    """Every review sample drawn, oldest first."""
+    return {
+        "samples": [s.model_dump() for s in get_service().list_review_samples()]
+    }
+
+
+@app.get("/api/reviews/samples/{sample_id}")
+def get_review_sample(sample_id: str):
+    """One sample with the verdicts recorded against it so far."""
+    try:
+        return get_service().get_review_sample(sample_id)
+    except KeyError:
+        raise HTTPException(
+            status_code=404, detail=f"unknown review sample {sample_id!r}"
+        )
+
+
+@app.post("/api/reviews/samples/{sample_id}/verdicts", status_code=201)
+def record_review_verdict(sample_id: str, body: ReviewVerdictRequest, request: Request):
+    """Record one reviewer's grading of one sampled run.
+
+    Per-family agree / disagree (all four families), an overall
+    verdict, and a note. The verdict lands on the review record;
+    the run's triage record is never edited by being graded. One
+    verdict per (sample, run, reviewer) — a repeat is a 409.
+    """
+    require_api_key(request)
+    if not body.reviewer.strip():
+        raise HTTPException(
+            status_code=422, detail="reviewer is required — a verdict names who graded it"
+        )
+    try:
+        verdict = get_service().record_review_verdict(
+            sample_id,
+            ticket_id=body.ticket_id.strip(),
+            reviewer=body.reviewer.strip(),
+            families=body.families,
+            overall=body.overall,
+            note=body.note,
+        )
+    except (KeyError, ValueError) as exc:
+        _review_http(exc)
+    return verdict.model_dump()
+
+
+@app.get("/api/reviews/report")
+def review_report(samples: str = ""):
+    """The agreement report: per-family rates, per-backend split,
+    overall agreement, and the disagreement list — over one sample
+    (``?samples=QAS-0001``), a comma-separated set, or all samples.
+
+    A read model: rates are withheld below the verdict floor (the
+    counts always show), and nothing in the report feeds a weight,
+    a threshold, or a prompt.
+    """
+    sample_ids = [part.strip() for part in samples.split(",") if part.strip()]
+    try:
+        return get_service().review_report(sample_ids or None)
+    except KeyError as exc:
+        raise HTTPException(
+            status_code=404, detail=exc.args[0] if exc.args else str(exc)
+        )
 
 
 @app.get("/api/runs/{ticket_id}/assignment")
