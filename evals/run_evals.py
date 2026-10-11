@@ -1,6 +1,6 @@
 """Golden routing eval: known tickets in, routing truth checked.
 
-Sixty-three synthetic tickets with authored expectations — category,
+Sixty-five synthetic tickets with authored expectations — category,
 queue, priority band, and the five safety/engineering verify flags.
 (36 through round 2; round 3 added multi-issue tickets, three more
 injection phrasings, a calm ticket that must stay low, a repeat
@@ -32,7 +32,15 @@ exactly with its assignment, a third reviewer refused off the
 overlap set while the open line holds off it, and a twelve-run
 double-graded world whose per-family Cohen's kappas are asserted
 to the decimal, including the no-variance family whose kappa is
-honestly null.)
+honestly null; the template-effectiveness round added the
+template cases — a staged world of template-earning tickets whose
+per-template resolution / reopen / escalation rates are asserted
+from hand-counted outcomes (one template flagged needs_review,
+one clean, one below the use floor with its rates withheld, and a
+pre-link record with an unnamed draft counted in the totals but
+attributed to no template), and a firewall case pinning that a
+flagged template's tickets compose byte-identically to a fresh
+service and still earn their draft.)
 Each case runs the full pipeline (screen → duplicate → one decision
 call → composition → guardrails) through a fresh service, on the
 deterministic offline backend by default, so the gate is hermetic:
@@ -838,6 +846,147 @@ def check_dossier_case(service: TriageService, case: dict) -> list[str]:
     return failures
 
 
+def check_template_case(service: TriageService, case: dict) -> list[str]:
+    """A template-effectiveness case (template_effectiveness.py).
+
+    Seeds a staged world of template-earning tickets — each seed's
+    earned template is asserted as a premise (a seed that earns no
+    draft, or the wrong area's, proves nothing) — decides them,
+    records their outcomes, reopens the declared ones, and then
+    un-names one stored draft (``legacy_template_ticket``) to stage
+    the pre-link record shape. Judges the effectiveness report
+    against hand-counted expectations: per-template rows, the
+    category baseline, the totals accounting, and the flagged set.
+    The report is pinned as a pure read (the stored records are
+    byte-identical across computing it), and a ``firewall_probe``
+    ticket must compose byte-identically in this flagged world and
+    in a fresh service where the flag does not stand.
+    """
+    failures: list[str] = []
+    for entry in case.get("template_seed", []):
+        ticket = TicketInput.model_validate(entry["ticket"])
+        result = service.run_ticket(ticket).result
+        got = result.draft.template if result.draft is not None else None
+        if got != entry.get("expect_template"):
+            failures.append(
+                f"{ticket.ticket_id}: premise broken — earned template "
+                f"{got!r}, expected {entry.get('expect_template')!r}"
+            )
+        if entry.get("decide", True):
+            service.record_decision(ticket.ticket_id, "approved", by="eval-agent")
+        if entry.get("outcome"):
+            _record_eval_outcome(service, ticket.ticket_id, entry["outcome"])
+        for spec in entry.get("reopens", []):
+            service.reopen_run(
+                ticket.ticket_id,
+                message=spec["message"],
+                actor=spec.get("actor", "eval-agent"),
+            )
+    legacy = case.get("legacy_template_ticket")
+    if legacy:
+        record = service.get_record(legacy)
+        if record is None or record.draft is None:
+            failures.append(
+                f"legacy premise broken: {legacy} has no stored draft to un-name"
+            )
+        else:
+            # The pre-link record shape: a draft whose template name
+            # was never recorded. Staged by blanking the stored
+            # record — history is not backfilled, here or in code.
+            record.draft.template = ""
+            service.store.save(record)
+
+    exp = case.get("expect_templates") or {}
+    if exp:
+        before = json.dumps(
+            [r.model_dump() for r in service.store.all_records()],
+            sort_keys=True,
+            default=str,
+        )
+        report = service.template_effectiveness()
+        after = json.dumps(
+            [r.model_dump() for r in service.store.all_records()],
+            sort_keys=True,
+            default=str,
+        )
+        if before != after:
+            failures.append("computing the effectiveness report changed the stored records")
+        for key, wanted in (exp.get("totals") or {}).items():
+            if report["totals"].get(key) != wanted:
+                failures.append(
+                    f"totals[{key!r}] = {report['totals'].get(key)}, expected {wanted}"
+                )
+        rows = {row["template"]: row for row in report["templates"]}
+        for name, wanted_row in (exp.get("rows") or {}).items():
+            row = rows.get(name)
+            if row is None:
+                failures.append(f"no effectiveness row for template {name!r}")
+                continue
+            for key, wanted in wanted_row.items():
+                if row.get(key) != wanted:
+                    failures.append(
+                        f"row {name!r}[{key!r}] = {row.get(key)}, expected {wanted}"
+                    )
+        for name in exp.get("absent_rows", []):
+            if name in rows:
+                failures.append(f"template {name!r} unexpectedly has a row")
+        categories = {row["category"]: row for row in report["categories"]}
+        for category, wanted_row in (exp.get("categories") or {}).items():
+            row = categories.get(category)
+            if row is None:
+                failures.append(f"no baseline row for category {category!r}")
+                continue
+            for key, wanted in wanted_row.items():
+                if row.get(key) != wanted:
+                    failures.append(
+                        f"baseline {category!r}[{key!r}] = {row.get(key)}, "
+                        f"expected {wanted}"
+                    )
+        if "flagged" in exp:
+            flagged = sorted(
+                row["template"] for row in report["templates"] if row["flag"]
+            )
+            if flagged != sorted(exp["flagged"]):
+                failures.append(f"flagged templates {flagged}, expected {exp['flagged']}")
+
+    probe = case.get("firewall_probe")
+    if probe:
+        spec = TicketInput.model_validate(probe)
+        here = service.run_ticket(spec).result
+        fresh = fresh_service().run_ticket(
+            TicketInput.model_validate(probe)
+        ).result
+        if here.composition.model_dump() != fresh.composition.model_dump():
+            failures.append(
+                "firewall broken: the probe composed differently in the "
+                "flagged world than in a fresh service"
+            )
+        if [a.model_dump() for a in here.answers] != [
+            a.model_dump() for a in fresh.answers
+        ]:
+            failures.append("firewall broken: the probe's answers differ")
+        here_draft = here.draft.template if here.draft is not None else None
+        fresh_draft = fresh.draft.template if fresh.draft is not None else None
+        if here_draft != fresh_draft:
+            failures.append(
+                f"firewall broken: probe draft {here_draft!r} under the flag "
+                f"vs {fresh_draft!r} without it — a flag must suppress nothing"
+            )
+
+    for exp_export in case.get("expect_export", []):
+        document = service.export_run(exp_export["ticket_id"])
+        stats = document["template_effectiveness"] or {}
+        for key, wanted in exp_export.items():
+            if key == "ticket_id":
+                continue
+            if stats.get(key) != wanted:
+                failures.append(
+                    f"export {exp_export['ticket_id']}: template block "
+                    f"[{key!r}] = {stats.get(key)}, expected {wanted}"
+                )
+    return failures
+
+
 def main() -> int:
     cases = load_cases()
     service = fresh_service()
@@ -846,7 +995,9 @@ def main() -> int:
     for case in cases:
         # A fresh service per case keeps the duplicate index honest:
         # only a case's own `previous` ticket may link to it.
-        if "qa_sample" in case:
+        if "template_seed" in case:
+            failures = check_template_case(fresh_service(), case)
+        elif "qa_sample" in case:
             failures = check_review_case(fresh_service(), case)
         elif "dossier_seed" in case or "dossier_new_ticket" in case:
             failures = check_dossier_case(fresh_service(), case)
