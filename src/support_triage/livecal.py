@@ -15,10 +15,18 @@ Truth keys accept agent-facing aliases (``was_pii``) as well as the
 question keys themselves (``contains_pii``); unknown keys are an
 error, never silently dropped — a truth nobody reads is worse than
 no truth.
+
+One exclusion, by design: a run an operator has confirmed as a
+duplicate (corrections.py) never becomes a sample. It is the same
+customer asking the same thing again — counting it would score the
+backend twice on one judgement. The exclusion is accounted in the
+report payload (``duplicates_excluded``), never silent, and it is a
+sampling rule only: the run still counts in volume stats.
 """
 
 from __future__ import annotations
 
+from . import corrections
 from .calibration import calibration_report
 from .questions import CATEGORIES
 from .schemas import TicketResult
@@ -91,9 +99,16 @@ def validate_final_category(category: str) -> str:
 
 
 def live_samples(records: list[TicketResult]) -> list[dict]:
-    """Calibration samples (eval-runner shape) from records with outcomes."""
+    """Calibration samples (eval-runner shape) from records with outcomes.
+
+    Confirmed duplicates are skipped (see the module docstring) —
+    the drift watch builds its stream from this function too, so
+    the exclusion covers both with one rule.
+    """
     samples: list[dict] = []
     for record in records:
+        if corrections.is_confirmed_duplicate(record):
+            continue
         outcome = record.outcome
         if outcome is None:
             continue
@@ -120,21 +135,36 @@ def live_samples(records: list[TicketResult]) -> list[dict]:
 
 def live_calibration(records: list[TicketResult]) -> dict:
     """Live calibration report over records that carry an agent outcome."""
+    excluded = corrections.duplicate_exclusions(records)
     with_outcomes = [r for r in records if r.outcome is not None]
+    # The sampled set: outcomes that judge the backend. Confirmed
+    # duplicates are labelled runs (they count in runs_with_outcomes
+    # and in volume) but never samples — see the module docstring.
+    sampled = [
+        r for r in with_outcomes if not corrections.is_confirmed_duplicate(r)
+    ]
     samples = live_samples(records)
 
-    category_judged = [r for r in with_outcomes if r.outcome and r.outcome.final_category]
-    queue_judged = [r for r in with_outcomes if r.outcome and r.outcome.final_queue]
+    category_judged = [r for r in sampled if r.outcome and r.outcome.final_category]
+    queue_judged = [r for r in sampled if r.outcome and r.outcome.final_queue]
+    note = (
+        "live calibration over agent-recorded outcomes"
+        if samples
+        else "no agent outcomes recorded yet — record one via "
+        "POST /api/runs/{ticket_id}/outcome and live calibration appears here"
+    )
+    if excluded:
+        note += (
+            f"; {len(excluded)} confirmed duplicate(s) excluded from sampling "
+            "(they still count in volume stats)"
+        )
     payload: dict = {
         "available": bool(samples),
         "runs_total": len(records),
         "runs_with_outcomes": len(with_outcomes),
-        "note": (
-            "live calibration over agent-recorded outcomes"
-            if samples
-            else "no agent outcomes recorded yet — record one via "
-            "POST /api/runs/{ticket_id}/outcome and live calibration appears here"
-        ),
+        "runs_sampled": len(sampled),
+        "duplicates_excluded": excluded,
+        "note": note,
         "category_accuracy": (
             round(
                 sum(1 for r in category_judged if r.category == r.outcome.final_category)
@@ -159,11 +189,11 @@ def live_calibration(records: list[TicketResult]) -> dict:
         ),
         "resolution_rate": (
             round(
-                sum(1 for r in with_outcomes if r.outcome and r.outcome.resolved)
-                / len(with_outcomes),
+                sum(1 for r in sampled if r.outcome and r.outcome.resolved)
+                / len(sampled),
                 4,
             )
-            if with_outcomes
+            if sampled
             else None
         ),
     }

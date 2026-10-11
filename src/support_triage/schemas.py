@@ -135,6 +135,56 @@ class ReopenInfo(BaseModel):
     template_suppressed: bool = True  # a reopen never gets the canned draft
 
 
+class ThreadCorrection(BaseModel):
+    """One operator correction to a run's computed thread grouping.
+
+    Corrections are an OVERLAY (corrections.py): the computed
+    ``thread_id`` on the record is never rewritten; a correction
+    appends an entry here saying where the run's chain belongs
+    instead, who moved it, and why. The effective thread a view
+    shows is the last correction's ``to_thread_id`` — or the
+    computed id when the list is empty. ``from_thread_id`` keeps the
+    lineage honest: what the machine had computed (or a prior
+    correction had set) is on the record, not lost. Corrections are
+    applied to a whole reopen chain at once — a chain is never split.
+    """
+
+    action: str = ""  # attach | detach | merge
+    from_thread_id: str = ""
+    to_thread_id: str = ""
+    by: str = ""  # the operator who made the correction
+    reason: str = ""
+    at: str = ""  # ISO datetime, stamped by the service
+
+
+class DuplicateMark(BaseModel):
+    """An operator's confirmed duplicate judgement on one run.
+
+    The intake duplicate check (``DuplicateInfo``) is a machine
+    guess — a similarity over a threshold. This is the human's word:
+    this run IS the same customer asking the same thing again as run
+    ``duplicate_of``. The mark lives on the duplicate's own record
+    (the surviving run is untouched), and an un-mark fills the
+    ``unmarked_*`` fields rather than deleting the entry — the audit
+    trail keeps both halves. While a mark is active the run is
+    excluded from calibration sampling and the drift window (a
+    duplicate is not a second opinion about the backend) but still
+    counts in volume stats (it WAS a ticket).
+    """
+
+    duplicate_of: str = ""
+    marked_by: str = ""
+    reason: str = ""
+    marked_at: str = ""  # ISO datetime, stamped by the service
+    unmarked_by: str = ""
+    unmarked_at: str = ""
+    unmark_reason: str = ""
+
+    @property
+    def active(self) -> bool:
+        return not self.unmarked_at
+
+
 class RunTelemetry(BaseModel):
     backend: str = ""
     model: str = ""
@@ -180,6 +230,18 @@ class TicketResult(BaseModel):
     # one issue share an id — "thr-<root ticket id>". A label,
     # assigned at intake; it merges and alters nothing.
     thread_id: str = ""
+    # Operator corrections to that grouping (corrections.py): an
+    # append-only overlay — thread_id above stays exactly what intake
+    # computed, and views resolve the effective thread through the
+    # last correction. Empty means the machine's grouping stands.
+    thread_corrections: list[ThreadCorrection] = Field(default_factory=list)
+    # Operator-confirmed duplicate (corrections.py): the audit trail
+    # of mark/un-mark actions, plus the live annotation — the ticket
+    # id this run is a confirmed duplicate of, "" when no mark is
+    # active. The intake guess stays in `duplicate` above; this is
+    # the human's confirmation of it (or of a pair the machine missed).
+    duplicate_marks: list[DuplicateMark] = Field(default_factory=list)
+    duplicate_of: str = ""
     external_action_taken: bool = False  # invariant: always False
     trace: list[TraceStep] = Field(default_factory=list)
     telemetry: Optional[RunTelemetry] = None

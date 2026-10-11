@@ -23,6 +23,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
+from . import corrections
 from .composition import BANDS
 from .schemas import TicketResult
 from .sla import sla_clock
@@ -118,6 +119,13 @@ def overview_stats(records: list[TicketResult], now: datetime | None = None) -> 
             ),
         },
         "outcomes_recorded": sum(1 for r in records if r.outcome is not None),
+        # Volume counts every run, confirmed duplicates included —
+        # they were tickets and agents handled them. The mark only
+        # removes them from calibration sampling (livecal.py); the
+        # count here is how an operator sees that population.
+        "confirmed_duplicates": sum(
+            1 for r in records if corrections.is_confirmed_duplicate(r)
+        ),
     }
 
 

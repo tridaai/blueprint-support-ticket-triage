@@ -21,7 +21,12 @@ still answer every question about the run:
   one — the outcome that judged the run;
 - for a reopen run, the chain context: which run it follows, the
   count against the reopen limit, what the decision backend did
-  with the prior run's record, and the priority floor it applied.
+  with the prior run's record, and the priority floor it applied;
+- the operator overlay (corrections.py): the thread grouping as
+  computed and as corrected (with each correction's actor and
+  reason), and any confirmed-duplicate mark — the machine's
+  duplicate guess and the human's confirmation are separate blocks,
+  because they are separate judgements.
 
 Everything here is composed in code from the stored record. No
 model is consulted and no prose is generated: the text rendering is
@@ -32,6 +37,7 @@ disagree (the suite pins the key facts in both).
 from __future__ import annotations
 
 from . import composition as comp
+from . import corrections
 from .schemas import TicketResult
 
 # The formula terms and the answer each one reads, for the trace.
@@ -146,6 +152,22 @@ def build_export(
             },
         }
 
+    grouping = corrections.grouping_view(record)
+    active_mark = corrections.active_duplicate_mark(record)
+    confirmed_duplicate = None
+    if record.duplicate_marks:
+        confirmed_duplicate = {
+            "duplicate_of": record.duplicate_of,
+            "active": active_mark is not None,
+            "marks": [mark.model_dump() for mark in record.duplicate_marks],
+            "sampling": (
+                "excluded from calibration sampling and the drift window "
+                "while the mark stands; still counted in volume stats"
+                if active_mark is not None
+                else "mark lifted — the run samples normally again"
+            ),
+        }
+
     document = {
         "kind": "run_audit_export",
         "export_version": 1,
@@ -154,6 +176,8 @@ def build_export(
         "status": record.status,
         "external_action_taken": record.external_action_taken,
         "intake": intake,
+        "grouping": grouping,
+        "confirmed_duplicate": confirmed_duplicate,
         "reopen": reopen,
         "injection_screen": {
             "flagged": bool(record.injection_flags),
@@ -290,6 +314,24 @@ def render_text(document: dict) -> str:
         if intake.get("thread_id"):
             lines.append(f"Thread: {intake['thread_id']}")
 
+    grouping = document.get("grouping") or {}
+    if grouping.get("corrected"):
+        lines.append("")
+        lines.append("GROUPING (operator-corrected)")
+        lines.append(
+            f"Thread as grouped at intake: {grouping['computed_thread_id']} · "
+            f"thread as corrected: {grouping['thread_id']}"
+        )
+        for entry in grouping["corrections"]:
+            lines.append(
+                f"  {entry['action']}: {entry['from_thread_id']} → {entry['to_thread_id']} "
+                f"by {entry['by'] or 'operator'} at {entry['at']} — {entry['reason']}"
+            )
+        lines.append(
+            "The computed grouping is preserved above; the correction is an "
+            "overlay and changed no decision on any run."
+        )
+
     duplicate = document["duplicate"]
     lines.append("")
     lines.append("DUPLICATE CHECK")
@@ -303,6 +345,22 @@ def render_text(document: dict) -> str:
             f"Not a duplicate (nearest similarity {_fmt(duplicate['similarity'], 3)}, "
             f"threshold {_fmt(duplicate['threshold'], 2)})"
         )
+
+    confirmed = document.get("confirmed_duplicate")
+    if confirmed:
+        lines.append("")
+        lines.append("CONFIRMED DUPLICATE (operator)")
+        for mark in confirmed["marks"]:
+            lines.append(
+                f"Marked as a duplicate of {mark['duplicate_of']} by "
+                f"{mark['marked_by'] or 'operator'} at {mark['marked_at']} — {mark['reason']}"
+            )
+            if mark["unmarked_at"]:
+                lines.append(
+                    f"  mark lifted by {mark['unmarked_by'] or 'operator'} at "
+                    f"{mark['unmarked_at']} — {mark['unmark_reason']}"
+                )
+        lines.append(f"Sampling: {confirmed['sampling']}")
 
     telemetry = document["telemetry"] or {}
     lines.append("")

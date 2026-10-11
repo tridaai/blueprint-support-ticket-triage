@@ -43,6 +43,14 @@ every route delegates, none re-implements. Notable behaviour:
   review), and ``GET /api/threads`` / ``GET /api/threads/{id}`` /
   ``GET /api/runs/{id}/thread`` serve the conversation threads the
   runs were grouped into at intake (threads.py);
+- the operator-correction layer (corrections.py): ``POST
+  /api/runs/{id}/thread/attach`` / ``.../thread/detach`` / ``POST
+  /api/threads/merge`` overrule the computed grouping (actor +
+  reason required, chains move whole, never across customers), and
+  ``POST /api/runs/{id}/duplicate`` / ``.../duplicate/unmark``
+  confirm or lift a duplicate judgement — a confirmed duplicate
+  leaves the calibration samples and the drift window, accounted
+  in both payloads, while still counting in volume stats;
 - ``/readiness`` fails (503) when PostgreSQL is configured but
   unreachable, and says honestly when the in-memory test doubles are
   in use (records lost on restart — fine for a look, not for work).
@@ -760,6 +768,150 @@ def run_thread(ticket_id: str):
         return get_service().run_thread(ticket_id)
     except KeyError:
         raise HTTPException(status_code=404, detail=f"unknown ticket {ticket_id!r}")
+
+
+class ThreadAttachRequest(BaseModel):
+    thread_id: str  # the existing thread the run's chain should join
+    actor: str = ""  # who is correcting the grouping
+    reason: str = ""  # why the machine's grouping was wrong
+
+
+class ThreadDetachRequest(BaseModel):
+    actor: str = ""
+    reason: str = ""
+
+
+class ThreadMergeRequest(BaseModel):
+    source_thread_id: str  # folded away
+    target_thread_id: str  # survives
+    actor: str = ""
+    reason: str = ""
+
+
+class DuplicateMarkRequest(BaseModel):
+    duplicate_of: str  # the surviving run this one duplicates
+    actor: str = ""
+    reason: str = ""
+
+
+class DuplicateUnmarkRequest(BaseModel):
+    actor: str = ""
+    reason: str = ""
+
+
+def _correction_http(exc: Exception):
+    """Map a correction refusal onto its status: KeyError → 404,
+    CorrectionError → its own (409 conflict / 422 invalid)."""
+    from .corrections import CorrectionError
+
+    if isinstance(exc, KeyError):
+        raise HTTPException(status_code=404, detail=exc.args[0] if exc.args else str(exc))
+    if isinstance(exc, CorrectionError):
+        raise HTTPException(status_code=exc.http_status, detail=str(exc))
+    raise exc
+
+
+def _require_correction_fields(actor: str, reason: str) -> tuple[str, str]:
+    if not actor.strip():
+        raise HTTPException(
+            status_code=422, detail="actor is required — a correction names who made it"
+        )
+    if not reason.strip():
+        raise HTTPException(
+            status_code=422,
+            detail="reason is required — a correction states why the machine was wrong",
+        )
+    return actor.strip(), reason.strip()
+
+
+@app.post("/api/runs/{ticket_id}/thread/attach")
+def attach_run_to_thread(ticket_id: str, body: ThreadAttachRequest, request: Request):
+    """Move a run's whole reopen chain into another thread.
+
+    An overlay on the computed grouping (corrections.py): the
+    record's computed thread id is preserved, the correction is
+    appended with its actor and reason, and thread views resolve
+    through it. The target must be an existing thread of the same
+    customer. The response is the run's corrected thread view.
+    """
+    require_api_key(request)
+    actor, reason = _require_correction_fields(body.actor, body.reason)
+    try:
+        return get_service().attach_run_to_thread(
+            ticket_id, body.thread_id.strip(), actor=actor, reason=reason
+        )
+    except (KeyError, ValueError) as exc:
+        _correction_http(exc)
+
+
+@app.post("/api/runs/{ticket_id}/thread/detach")
+def detach_run(ticket_id: str, body: ThreadDetachRequest, request: Request):
+    """Move a run's whole reopen chain out into its own thread
+    (``thr-op-<chain root>``). Refused (409) when the chain is
+    already alone in its thread. The response is the new thread's
+    view."""
+    require_api_key(request)
+    actor, reason = _require_correction_fields(body.actor, body.reason)
+    try:
+        return get_service().detach_run(ticket_id, actor=actor, reason=reason)
+    except (KeyError, ValueError) as exc:
+        _correction_http(exc)
+
+
+@app.post("/api/threads/merge")
+def merge_threads(body: ThreadMergeRequest, request: Request):
+    """Fold one thread into another (the target survives): every
+    run in the source thread is corrected into the target, with
+    the lineage on each record. Both threads must exist and belong
+    to one customer. The response is the surviving thread's view."""
+    require_api_key(request)
+    actor, reason = _require_correction_fields(body.actor, body.reason)
+    try:
+        return get_service().merge_threads(
+            body.source_thread_id.strip(),
+            body.target_thread_id.strip(),
+            actor=actor,
+            reason=reason,
+        )
+    except (KeyError, ValueError) as exc:
+        _correction_http(exc)
+
+
+@app.post("/api/runs/{ticket_id}/duplicate")
+def mark_duplicate(ticket_id: str, body: DuplicateMarkRequest, request: Request):
+    """Confirm this run as a duplicate of another run (same customer).
+
+    The human's word over the intake similarity guess: the mark
+    lands on this run's record only, and while it stands the run is
+    excluded from calibration sampling and the drift window
+    (accounted in both payloads) — it still counts in volume stats.
+    A run with a live mark cannot be marked again (409, naming the
+    existing mark). The response is the updated record.
+    """
+    require_api_key(request)
+    actor, reason = _require_correction_fields(body.actor, body.reason)
+    try:
+        record = get_service().mark_duplicate(
+            ticket_id, body.duplicate_of.strip(), actor=actor, reason=reason
+        )
+    except (KeyError, ValueError) as exc:
+        _correction_http(exc)
+    return record.model_dump()
+
+
+@app.post("/api/runs/{ticket_id}/duplicate/unmark")
+def unmark_duplicate(ticket_id: str, body: DuplicateUnmarkRequest, request: Request):
+    """Lift a confirmed-duplicate mark. The mark entry stays on the
+    record with its un-mark half filled in — the audit trail keeps
+    both halves — and the run samples normally again. The response
+    is the updated record."""
+    require_api_key(request)
+    actor, reason = _require_correction_fields(body.actor, body.reason)
+    try:
+        record = get_service().unmark_duplicate(ticket_id, actor=actor, reason=reason)
+    except (KeyError, ValueError) as exc:
+        _correction_http(exc)
+    return record.model_dump()
 
 
 @app.get("/api/runs/{ticket_id}/assignment")

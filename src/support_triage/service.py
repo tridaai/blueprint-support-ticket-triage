@@ -14,7 +14,11 @@ never to the graph directly. The service:
 - reopens a handled ticket: the customer's follow-up becomes a new,
   linked run (the prior record is never mutated) carrying the prior
   run's record as decision context, and assigns every fresh run its
-  conversation thread at intake (threads.py).
+  conversation thread at intake (threads.py);
+- records operator corrections (corrections.py): thread attach /
+  detach / merge and confirmed-duplicate marks — append-only
+  overlays on the records that change where a run sits (and whether
+  it counts as a calibration sample), never what was decided on it.
 """
 
 from __future__ import annotations
@@ -26,12 +30,12 @@ from datetime import datetime, timezone
 from langgraph.types import Command
 from pydantic import ValidationError
 
-from . import threads, webhooks
+from . import corrections, threads, webhooks
 from .composition import reopen_limit_in_force
 from .events import CollectingSink, EventBus, RunEvent
 from .graph import AgentRun, build_graph
 from .ports import Checkpointer, DecisionEngine, Embedder, EventSink, ObjectStore, Store, VectorIndex
-from .schemas import AgentOutcome, TicketInput, TicketResult
+from .schemas import AgentOutcome, DuplicateMark, ThreadCorrection, TicketInput, TicketResult
 from .sla import format_timestamp, parse_timestamp
 
 # A batch is an intake convenience, not a bulk-import channel: the
@@ -562,7 +566,10 @@ class TriageService:
                 if getattr(self.engine, "name", "") == "offline"
                 else "history_block"
             ),
-            "thread_id": threads.effective_thread_id(record.thread_id, record.ticket_id),
+            # The chain joins the prior run's EFFECTIVE thread: if an
+            # operator corrected the chain's grouping, the reopen
+            # follows the correction, not the superseded computation.
+            "thread_id": corrections.effective_thread_id(record),
         }
         return self.run_ticket(new_ticket, reopen=reopen)
 
@@ -670,10 +677,17 @@ class TriageService:
         )["thread_id"]
 
     def _thread_rows(self) -> list[dict]:
-        return [
-            threads.run_row(record, self._stored_input(record.ticket_id))
-            for record in self.store.all_records()
-        ]
+        rows = []
+        for record in self.store.all_records():
+            row = threads.run_row(record, self._stored_input(record.ticket_id))
+            # The operator overlay (corrections.py): views group by
+            # the EFFECTIVE thread and carry the grouping lineage;
+            # the computed id stays visible beside it.
+            row["thread_id"] = corrections.effective_thread_id(record)
+            row["grouping"] = corrections.grouping_view(record)
+            row["duplicate_of"] = record.duplicate_of
+            rows.append(row)
+        return rows
 
     def list_threads(self) -> dict:
         """Every conversation thread over the stored runs (threads.py)."""
@@ -696,9 +710,250 @@ class TriageService:
         record = self.store.get(ticket_id)
         if record is None:
             raise KeyError(f"unknown ticket {ticket_id!r}")
-        return self.get_thread(
-            threads.effective_thread_id(record.thread_id, record.ticket_id)
+        return self.get_thread(corrections.effective_thread_id(record))
+
+    # -- operator corrections (threads + confirmed duplicates) --------------
+
+    @staticmethod
+    def _require_actor_reason(actor: str, reason: str) -> tuple[str, str]:
+        actor = (actor or "").strip()
+        reason = (reason or "").strip()
+        if not actor:
+            raise corrections.CorrectionError(
+                "actor is required — a correction names who made it"
+            )
+        if not reason:
+            raise corrections.CorrectionError(
+                "reason is required — a correction states why the machine was wrong"
+            )
+        return actor, reason
+
+    def _customer_key_for(self, record: TicketResult) -> str:
+        stored = self._stored_input(record.ticket_id)
+        return threads.customer_key(
+            stored.sender_email if stored is not None else "",
+            record.sender_name,
         )
+
+    def _apply_thread_correction(
+        self,
+        chain: list[TicketResult],
+        *,
+        action: str,
+        to_thread_id: str,
+        actor: str,
+        reason: str,
+    ) -> None:
+        """Append one correction entry to every run in a chain and
+        save — the computed thread_id on each record is untouched."""
+        now = format_timestamp(datetime.now(timezone.utc))
+        for member in chain:
+            member.thread_corrections.append(
+                ThreadCorrection(
+                    action=action,
+                    from_thread_id=corrections.effective_thread_id(member),
+                    to_thread_id=to_thread_id,
+                    by=actor,
+                    reason=reason,
+                    at=now,
+                )
+            )
+            self.store.save(member)
+
+    def attach_run_to_thread(
+        self, ticket_id: str, target_thread_id: str, *, actor: str, reason: str
+    ) -> dict:
+        """Move a run's whole reopen chain into another thread.
+
+        The operator's word over the intake computation: the chain
+        (never part of it) joins ``target_thread_id``, which must be
+        an existing thread of the SAME customer — grouping never
+        crosses customers, and neither do corrections. Returns the
+        run's corrected thread view.
+        """
+        actor, reason = self._require_actor_reason(actor, reason)
+        record = self.store.get(ticket_id)
+        if record is None:
+            raise KeyError(f"unknown ticket {ticket_id!r}")
+        records = self.store.all_records()
+        target_members = [
+            r for r in records if corrections.effective_thread_id(r) == target_thread_id
+        ]
+        if not target_members:
+            raise KeyError(f"unknown thread {target_thread_id!r}")
+        current = corrections.effective_thread_id(record)
+        if current == target_thread_id:
+            raise corrections.CorrectionConflict(
+                f"run {ticket_id} is already in thread {target_thread_id}"
+            )
+        chain = corrections.chain_of(records, record)
+        customer = self._customer_key_for(record)
+        for member in target_members:
+            if self._customer_key_for(member) != customer:
+                raise corrections.CorrectionError(
+                    f"thread {target_thread_id} belongs to a different customer — "
+                    "a correction cannot group two customers' runs"
+                )
+        self._apply_thread_correction(
+            chain, action="attach", to_thread_id=target_thread_id,
+            actor=actor, reason=reason,
+        )
+        return self.run_thread(ticket_id)
+
+    def detach_run(self, ticket_id: str, *, actor: str, reason: str) -> dict:
+        """Move a run's whole reopen chain out into its own thread.
+
+        The detached chain gets an operator thread id
+        (``thr-op-<chain root>``) so it can never collide with a
+        computed ``thr-<ticket>`` id. Refused when the chain is
+        already alone in its thread — there is nothing to correct.
+        Returns the new thread's view.
+        """
+        actor, reason = self._require_actor_reason(actor, reason)
+        record = self.store.get(ticket_id)
+        if record is None:
+            raise KeyError(f"unknown ticket {ticket_id!r}")
+        records = self.store.all_records()
+        chain = corrections.chain_of(records, record)
+        current = corrections.effective_thread_id(record)
+        others = [
+            r
+            for r in records
+            if corrections.effective_thread_id(r) == current
+            and corrections.chain_root_id(r) != corrections.chain_root_id(record)
+        ]
+        if not others:
+            raise corrections.CorrectionConflict(
+                f"run {ticket_id} is already alone in thread {current} — "
+                "there is no grouping to correct"
+            )
+        new_thread_id = f"thr-op-{corrections.chain_root_id(record)}"
+        self._apply_thread_correction(
+            chain, action="detach", to_thread_id=new_thread_id,
+            actor=actor, reason=reason,
+        )
+        return self.run_thread(ticket_id)
+
+    def merge_threads(
+        self, source_thread_id: str, target_thread_id: str, *, actor: str, reason: str
+    ) -> dict:
+        """Fold one thread into another: every run in the source
+        thread is corrected into the target, which survives. Both
+        threads must exist and belong to one customer. Returns the
+        surviving thread's view."""
+        actor, reason = self._require_actor_reason(actor, reason)
+        if source_thread_id == target_thread_id:
+            raise corrections.CorrectionConflict(
+                f"thread {source_thread_id} cannot merge into itself"
+            )
+        records = self.store.all_records()
+        source_members = [
+            r for r in records if corrections.effective_thread_id(r) == source_thread_id
+        ]
+        if not source_members:
+            raise KeyError(f"unknown thread {source_thread_id!r}")
+        target_members = [
+            r for r in records if corrections.effective_thread_id(r) == target_thread_id
+        ]
+        if not target_members:
+            raise KeyError(f"unknown thread {target_thread_id!r}")
+        customers = {self._customer_key_for(r) for r in source_members + target_members}
+        if len(customers) > 1:
+            raise corrections.CorrectionError(
+                f"threads {source_thread_id} and {target_thread_id} belong to "
+                "different customers — a correction cannot merge them"
+            )
+        now = format_timestamp(datetime.now(timezone.utc))
+        for member in source_members:
+            member.thread_corrections.append(
+                ThreadCorrection(
+                    action="merge",
+                    from_thread_id=source_thread_id,
+                    to_thread_id=target_thread_id,
+                    by=actor,
+                    reason=reason,
+                    at=now,
+                )
+            )
+            self.store.save(member)
+        return self.get_thread(target_thread_id)
+
+    def mark_duplicate(
+        self, ticket_id: str, duplicate_of: str, *, actor: str, reason: str
+    ) -> TicketResult:
+        """Confirm, on the record, that one run duplicates another.
+
+        The operator's confirmation of (or correction to) the intake
+        duplicate guess. The mark lands on the duplicate's record
+        only — the surviving run is untouched — and takes effect
+        immediately: the run leaves the calibration samples and the
+        drift window, with the exclusion accounted in both payloads.
+        A run with a live mark cannot be marked again; a mark across
+        customers is refused (a duplicate is the same customer
+        asking again).
+        """
+        actor, reason = self._require_actor_reason(actor, reason)
+        record = self.store.get(ticket_id)
+        if record is None:
+            raise KeyError(f"unknown ticket {ticket_id!r}")
+        survivor = self.store.get(duplicate_of)
+        if survivor is None:
+            raise KeyError(f"unknown ticket {duplicate_of!r}")
+        if duplicate_of == ticket_id:
+            raise corrections.CorrectionError(
+                "a run cannot be marked as a duplicate of itself"
+            )
+        existing = corrections.active_duplicate_mark(record)
+        if existing is not None:
+            raise corrections.CorrectionConflict(
+                f"run {ticket_id} is already marked as a duplicate of "
+                f"{existing.duplicate_of} (by {existing.marked_by or 'operator'}: "
+                f"{existing.reason}) — unmark it before marking it again"
+            )
+        own_key = self._customer_key_for(record)
+        other_key = self._customer_key_for(survivor)
+        if not own_key or own_key != other_key:
+            raise corrections.CorrectionError(
+                f"runs {ticket_id} and {duplicate_of} are not from the same "
+                "customer — a confirmed duplicate is the same customer asking "
+                "the same thing again"
+            )
+        record.duplicate_marks.append(
+            DuplicateMark(
+                duplicate_of=duplicate_of,
+                marked_by=actor,
+                reason=reason,
+                marked_at=format_timestamp(datetime.now(timezone.utc)),
+            )
+        )
+        record.duplicate_of = duplicate_of
+        self.store.save(record)
+        return record
+
+    def unmark_duplicate(
+        self, ticket_id: str, *, actor: str, reason: str
+    ) -> TicketResult:
+        """Lift a confirmed-duplicate mark (also audited).
+
+        The mark entry stays on the record with its un-mark half
+        filled in; the run re-enters the calibration samples and the
+        drift window from the next read.
+        """
+        actor, reason = self._require_actor_reason(actor, reason)
+        record = self.store.get(ticket_id)
+        if record is None:
+            raise KeyError(f"unknown ticket {ticket_id!r}")
+        mark = corrections.active_duplicate_mark(record)
+        if mark is None:
+            raise corrections.CorrectionConflict(
+                f"run {ticket_id} has no confirmed-duplicate mark to lift"
+            )
+        mark.unmarked_by = actor
+        mark.unmark_reason = reason
+        mark.unmarked_at = format_timestamp(datetime.now(timezone.utc))
+        record.duplicate_of = ""
+        self.store.save(record)
+        return record
 
     # -- policy replay + audit export (reads over the records) --------------
 

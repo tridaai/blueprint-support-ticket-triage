@@ -25,10 +25,17 @@ Thresholds are deployment config (environment-overridable, read at
 call time): ``DRIFT_WINDOW`` (50), ``DRIFT_MIN_SAMPLES`` (20),
 ``DRIFT_BRIER_THRESHOLD`` (0.05). The payload carries the values in
 force so the dashboard never shows a flag without its ruler.
+
+Confirmed duplicates (corrections.py) never enter the stream: the
+stream is built from :func:`support_triage.livecal.live_samples`,
+which skips them, and the payload accounts for them under
+``excluded_duplicates`` — a duplicate's outcome is not evidence
+about the backend, in the window or out of it.
 """
 
 from __future__ import annotations
 
+from . import corrections
 from .calibration import calibration_report
 from .config import env_float, env_int
 from .livecal import live_samples
@@ -121,6 +128,7 @@ def drift_report(
     return {
         "available": bool(stream),
         "note": note,
+        "excluded_duplicates": corrections.duplicate_exclusions(records),
         "window": {
             "size": window_size,
             "min_samples": min_samples,

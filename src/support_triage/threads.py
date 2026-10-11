@@ -209,6 +209,12 @@ def thread_summaries(rows: list[dict]) -> list[dict]:
                 "ticket_ids": [row["ticket_id"] for row in members],
                 "open_runs": sum(1 for row in members if row["status"] == "awaiting_agent"),
                 "reopened": any(row["is_reopen"] for row in members),
+                # An operator has overruled the computed grouping for
+                # at least one run here (corrections.py) — the rows
+                # carry the lineage; the summary just flies the flag.
+                "corrected": any(
+                    (row.get("grouping") or {}).get("corrected") for row in members
+                ),
                 "latest_outcome": latest_outcome,
                 "first_received_at": root["received_at"],
                 "latest_received_at": members[-1]["received_at"],
