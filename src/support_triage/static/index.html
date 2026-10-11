@@ -107,6 +107,7 @@
   <button id="tab-compare">Compare backends</button>
   <button id="tab-threads">Threads</button>
   <button id="tab-qa">QA review</button>
+  <button id="tab-incidents">Incidents</button>
 </nav>
 
 <main id="view-console">
@@ -337,6 +338,27 @@
   </section>
 </main>
 
+<main id="view-incidents" style="display:none; grid-template-columns:1fr">
+  <section>
+    <h2>Incident clustering — the outage is twenty tickets wearing twenty names</h2>
+    <p class="note">Threads group one customer's runs; this view groups <strong>many customers'</strong> runs around one underlying event. Proposals are computed in code on every load — same product area and category, arrivals inside the window of the group's first report, every member sharing enough of its words with that first report, at least the member floor — and the rule's constants print on the payload. A proposal is a view; confirming or dismissing it is the stored act, under a named lead. Membership lives on the incident record: it never edits, re-routes, re-prioritises or closes a member run — it badges the queue row, annotates the run's record view, and gives the lead one working list. A dismissed member set never proposes again; a set that gains a member may, and says which dismissal it outgrew.</p>
+    <div class="row">
+      <label for="inc-actor">Lead name</label>
+      <input type="text" id="inc-actor" placeholder="e.g. L. Lead">
+      <label for="inc-reason">Reason</label>
+      <input type="text" id="inc-reason" placeholder="required to dismiss or close; optional on a decline" style="min-width:280px">
+      <button id="inc-refresh">Rescan</button>
+      <span class="note" id="inc-status"></span>
+    </div>
+    <h2 style="margin-top:18px">Cluster proposals</h2>
+    <div id="inc-proposals" class="empty">Loading…</div>
+    <h2 style="margin-top:18px">Incidents</h2>
+    <div id="inc-list" class="empty">Loading…</div>
+    <h2 style="margin-top:18px">Incident detail</h2>
+    <div id="inc-detail" class="empty">Pick an incident above — its members read live from their runs, with the addition candidates the rule currently offers.</div>
+  </section>
+</main>
+
 <footer>
   <div class="footer-brand">
     <img src="/static/brand/tridaai-logo.png" alt="Trida AI">
@@ -434,7 +456,7 @@ async function loadQueue() {
   if (!data.tickets || !data.tickets.length) { $('queue').className = 'empty'; $('queue').textContent = qs ? 'No tickets match the filters.' : 'Queue is empty.'; return; }
   $('queue').className = '';
   $('queue').innerHTML = `<table><tr><th>Ticket</th><th>Category</th><th>Priority</th><th>Queue</th><th>Conf.</th></tr>` +
-    data.tickets.map(t => `<tr class="clickable" data-id="${esc(t.ticket_id)}"><td>${esc(t.ticket_id)}<br><span class="note">${esc(t.subject)}</span></td><td>${esc(t.category)}${t.requires_human_review ? ' <span class="flag">review</span>' : ''}${t.is_duplicate ? ' <span class="pill warn">dup</span>' : ''}</td><td>${t.priority_score.toFixed(1)} ${bandPill(t.priority_band)}${slaChip(t)}</td><td>${esc(t.queue)}</td><td>${(t.category_confidence*100).toFixed(0)}%</td></tr>`).join('') + `</table>`;
+    data.tickets.map(t => `<tr class="clickable" data-id="${esc(t.ticket_id)}"><td>${esc(t.ticket_id)}<br><span class="note">${esc(t.subject)}</span></td><td>${esc(t.category)}${t.requires_human_review ? ' <span class="flag">review</span>' : ''}${t.is_duplicate ? ' <span class="pill warn">dup</span>' : ''}${t.incident ? ` <span class="pill warn" title="${esc(t.incident.title)}">${esc(t.incident.incident_id)}</span>` : ''}</td><td>${t.priority_score.toFixed(1)} ${bandPill(t.priority_band)}${slaChip(t)}</td><td>${esc(t.queue)}</td><td>${(t.category_confidence*100).toFixed(0)}%</td></tr>`).join('') + `</table>`;
   $('queue').querySelectorAll('tr.clickable').forEach(tr => tr.onclick = () => openTicket(tr.dataset.id));
 }
 
@@ -496,6 +518,7 @@ function renderResult(r) {
       <dt>Category</dt><dd>${esc(r.category)} · ${esc(r.product_area)}</dd>
       <dt>Priority</dt><dd><strong>${Number(comp.priority_score).toFixed(1)}</strong> ${bandPill(comp.priority_band)}</dd>
       <dt>Queue</dt><dd>${esc(comp.queue)} <span class="note">— ${esc(comp.routing_reason)}</span></dd>
+      ${r.incident_context ? `<dt>Incident</dt><dd>${esc(r.incident_context)} <span class="note">— membership lives on the incident record; it changed nothing on this run</span></dd>` : ''}
       <dt>Backend</dt><dd>${esc(tele.backend)} ${tele.model ? `(${esc(tele.model)})` : ''} · decision latency ${tele.decision_latency_ms} ms · ${tele.question_count} questions</dd>
       <dt>Safety flags</dt><dd>${flags.length ? flags.map(f => pill(f, 'bad')).join(' ') : '<span class="note">none raised</span>'}</dd>
       <dt>Duplicate</dt><dd>${r.duplicate && r.duplicate.is_duplicate ? `<span class="flag">probable duplicate of ${esc(r.duplicate.similar_ticket_id)}</span> (similarity ${Number(r.duplicate.similarity).toFixed(3)})` : `no (nearest similarity ${r.duplicate ? Number(r.duplicate.similarity).toFixed(3) : '—'})`}${r.duplicate_of ? `<br><span class="flag">confirmed duplicate of ${esc(r.duplicate_of)}</span> <span class="note">— an operator's mark (section below); excluded from calibration sampling while it stands</span>` : ''}</dd>
@@ -992,6 +1015,128 @@ async function submitMerge(currentThread) {
 }
 $('threads-refresh').onclick = loadThreads;
 
+// ---------------------------------------------------------------- incidents
+function incActorReason() {
+  return {
+    actor: ($('inc-actor').value || '').trim(),
+    reason: ($('inc-reason').value || '').trim(),
+  };
+}
+
+async function incidentPost(url, payload, okText) {
+  const status = $('inc-status');
+  status.textContent = 'working…';
+  try {
+    const res = await fetch(url, {method: 'POST', headers: headers(), body: JSON.stringify(payload)});
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.detail || res.statusText);
+    }
+    const view = await res.json();
+    await loadIncidents();
+    if (view && view.incident) await openIncidentDetail(view.incident.incident_id);
+    status.textContent = okText;
+    return view;
+  } catch (e) { status.textContent = 'failed: ' + e.message; return null; }
+}
+
+async function loadIncidents() {
+  const propBox = $('inc-proposals');
+  const listBox = $('inc-list');
+  try {
+    const [propRes, listRes] = await Promise.all([
+      fetch('/api/incidents/proposals', {headers: headers()}),
+      fetch('/api/incidents', {headers: headers()}),
+    ]);
+    if (!propRes.ok || !listRes.ok) throw new Error('unavailable');
+    const payload = await propRes.json();
+    const listing = await listRes.json();
+    const c = payload.constants || {};
+    if (!payload.proposals || !payload.proposals.length) {
+      propBox.className = 'empty';
+      propBox.textContent = `No cluster currently proposes — the rule (same area + category, ${c.window_hours}h window from the first report, word overlap ≥ ${c.overlap_threshold} with it, at least ${c.min_members} reports) finds no group.${payload.suppressed_dismissed ? ` ${payload.suppressed_dismissed} dismissed grouping(s) suppressed.` : ''}`;
+    } else {
+      propBox.className = '';
+      propBox.innerHTML = payload.proposals.map(p => `
+        <div class="qblock">
+          <div class="qhead"><span class="qk">${esc(p.suggested_title)}</span><span class="pill">${esc(p.product_area)} · ${esc(p.category)}</span></div>
+          <p class="note" style="margin:6px 0">${p.signals.member_count} reports · ${p.signals.distinct_customers} customers · span ${p.signals.span_minutes} min · word overlap vs first report: min ${Number(p.signals.min_overlap).toFixed(2)}, mean ${Number(p.signals.mean_overlap).toFixed(2)} (rule: ${c.window_hours}h window, ≥ ${c.min_members} reports, overlap ≥ ${c.overlap_threshold})${p.outgrows_dismissal ? ` · outgrows a dismissal by ${esc(p.outgrows_dismissal.dismissed_by)} (“${esc(p.outgrows_dismissal.reason)}”)` : ''}</p>
+          <p style="margin:4px 0">${p.members.map(m => `${esc(m.ticket_id)} <span class="note">(${esc(m.received_at)})</span>`).join(' · ')}</p>
+          <div class="row" style="margin-top:6px">
+            <button class="primary" data-confirm="${esc(p.proposal_id)}">Confirm as one incident</button>
+            <button data-dismiss="${esc(p.proposal_id)}">Dismiss (reason required)</button>
+          </div>
+        </div>`).join('');
+      propBox.querySelectorAll('[data-confirm]').forEach(btn => btn.onclick = () => {
+        const {actor} = incActorReason();
+        if (!actor) { $('inc-status').textContent = 'a confirmation names the lead'; return; }
+        incidentPost(`/api/incidents/proposals/${encodeURIComponent(btn.dataset.confirm)}/confirm`, {actor}, 'confirmed — the incident is open; no member run was edited');
+      });
+      propBox.querySelectorAll('[data-dismiss]').forEach(btn => btn.onclick = () => {
+        const {actor, reason} = incActorReason();
+        if (!actor || !reason) { $('inc-status').textContent = 'a dismissal names the lead, and why these are not one event'; return; }
+        incidentPost(`/api/incidents/proposals/${encodeURIComponent(btn.dataset.dismiss)}/dismiss`, {actor, reason}, 'dismissed — this exact member set will not propose again');
+      });
+    }
+    const views = listing.incidents || [];
+    if (!views.length) {
+      listBox.className = 'empty';
+      listBox.textContent = 'No incidents yet — confirm a proposal above.';
+    } else {
+      listBox.className = '';
+      listBox.innerHTML = `<table><tr><th>Incident</th><th>Title</th><th>Members</th><th>Open members</th><th>Status</th><th>Opened by</th></tr>` +
+        views.map(v => `<tr class="clickable" data-incident="${esc(v.incident.incident_id)}"><td>${esc(v.incident.incident_id)}</td><td>${esc(v.incident.title)}</td><td>${v.member_count}</td><td>${v.open_members}</td><td>${pill(v.incident.status, v.incident.status === 'open' ? 'warn' : 'good')}</td><td>${esc(v.incident.opened_by)}</td></tr>`).join('') + `</table>`;
+      listBox.querySelectorAll('tr.clickable').forEach(tr => tr.onclick = () => openIncidentDetail(tr.dataset.incident));
+    }
+  } catch (e) {
+    propBox.className = 'empty';
+    propBox.textContent = 'Incidents unavailable.';
+  }
+}
+
+async function openIncidentDetail(incidentId) {
+  const box = $('inc-detail');
+  try {
+    const res = await fetch(`/api/incidents/${encodeURIComponent(incidentId)}`, {headers: headers()});
+    if (!res.ok) throw new Error('unavailable');
+    const view = await res.json();
+    const inc = view.incident;
+    const members = (view.members || []).map(m => `<tr class="clickable" data-id="${esc(m.ticket_id)}"><td>${esc(m.ticket_id)}<br><span class="note">${esc(m.subject || '')}</span></td><td>${esc(m.sender_name || '')}</td><td>${esc(m.origin)}</td><td>${esc(m.priority_band || '')}</td><td>${esc(m.queue || '')}</td><td>${esc(m.sla_state || '—')}</td><td>${esc(m.status || '')}</td></tr>`).join('');
+    const candidates = view.addition_candidates || [];
+    const candRows = candidates.length ? `<h3 style="margin-top:16px">Addition candidates — late arrivals the rule offers</h3>
+      <table><tr><th>Ticket</th><th>Arrived</th><th>Overlap vs first report</th><th></th><th></th></tr>` +
+      candidates.map(cd => `<tr><td>${esc(cd.ticket_id)}<br><span class="note">${esc(cd.subject)}</span></td><td>${esc(cd.received_at)}</td><td>${Number(cd.overlap).toFixed(2)}</td><td><button data-add="${esc(cd.ticket_id)}">Add</button></td><td><button data-decline="${esc(cd.ticket_id)}">Decline</button></td></tr>`).join('') + `</table>
+      <p class="note">Adding appends the run to this incident's member list — the run's own record, priority and queue do not change. A declined ticket is never offered for this incident again.</p>` : '';
+    const declined = (inc.declined || []).length ? `<p class="note">Declined for this incident: ${(inc.declined).map(d => `${esc(d.ticket_id)} (by ${esc(d.by)}${d.reason ? ` — ${esc(d.reason)}` : ''})`).join(' · ')}</p>` : '';
+    box.className = '';
+    box.innerHTML = `<p class="note" style="margin-top:0">${esc(view.context_line)} · opened by ${esc(inc.opened_by)} at ${esc(inc.opened_at)}${inc.status === 'closed' ? ` · closed by ${esc(inc.closed_by)} — ${esc(inc.close_reason)}` : ''} · click a member to open its decision record</p>
+      <table><tr><th>Ticket</th><th>Sender</th><th>Joined via</th><th>Band</th><th>Queue</th><th>SLA</th><th>Status</th></tr>${members}</table>
+      ${candRows}${declined}
+      ${inc.status === 'open' ? `<div class="row" style="margin-top:12px"><button id="inc-close">Close incident (reason required)</button><span class="note">Closure is about the incident only — every member keeps its own status, decision and outcome.</span></div>` : ''}`;
+    box.querySelectorAll('tr.clickable').forEach(tr => tr.onclick = () => { showView('console'); openTicket(tr.dataset.id); });
+    box.querySelectorAll('[data-add]').forEach(btn => btn.onclick = () => {
+      const {actor} = incActorReason();
+      if (!actor) { $('inc-status').textContent = 'adding a member names the lead'; return; }
+      incidentPost(`/api/incidents/${encodeURIComponent(incidentId)}/members`, {ticket_id: btn.dataset.add, actor}, 'member added — the run itself was not edited');
+    });
+    box.querySelectorAll('[data-decline]').forEach(btn => btn.onclick = () => {
+      const {actor, reason} = incActorReason();
+      if (!actor) { $('inc-status').textContent = 'a decline names the lead'; return; }
+      incidentPost(`/api/incidents/${encodeURIComponent(incidentId)}/members/decline`, {ticket_id: btn.dataset.decline, actor, reason}, 'declined — it will not be offered for this incident again');
+    });
+    const closeBtn = $('inc-close');
+    if (closeBtn) closeBtn.onclick = () => {
+      const {actor, reason} = incActorReason();
+      if (!actor || !reason) { $('inc-status').textContent = 'a closure names the lead, and its basis'; return; }
+      incidentPost(`/api/incidents/${encodeURIComponent(incidentId)}/close`, {actor, reason}, 'incident closed — every member keeps its own flow');
+    };
+  } catch (e) {
+    box.className = 'empty';
+    box.textContent = 'Incident unavailable.';
+  }
+}
+$('inc-refresh').onclick = loadIncidents;
+
 $('analyze').onclick = async () => {
   let ticket;
   try { ticket = JSON.parse($('json').value); }
@@ -1326,21 +1471,25 @@ function showView(name) {
   $('view-compare').style.display = name === 'compare' ? '' : 'none';
   $('view-threads').style.display = name === 'threads' ? '' : 'none';
   $('view-qa').style.display = name === 'qa' ? '' : 'none';
+  $('view-incidents').style.display = name === 'incidents' ? '' : 'none';
   $('tab-console').classList.toggle('active', name === 'console');
   $('tab-dashboards').classList.toggle('active', name === 'dashboards');
   $('tab-compare').classList.toggle('active', name === 'compare');
   $('tab-threads').classList.toggle('active', name === 'threads');
   $('tab-qa').classList.toggle('active', name === 'qa');
+  $('tab-incidents').classList.toggle('active', name === 'incidents');
   if (name === 'dashboards' && !dashboardsLoaded) loadDashboards();
   if (name === 'compare' && !$('cmp-json').value) $('cmp-json').value = $('json').value;
   if (name === 'threads') loadThreads();
   if (name === 'qa') loadQaSamples();
+  if (name === 'incidents') loadIncidents();
 }
 $('tab-console').onclick = () => showView('console');
 $('tab-dashboards').onclick = () => showView('dashboards');
 $('tab-compare').onclick = () => showView('compare');
 $('tab-threads').onclick = () => showView('threads');
 $('tab-qa').onclick = () => showView('qa');
+$('tab-incidents').onclick = () => showView('incidents');
 $('dash-refresh').onclick = loadDashboards;
 
 // ---------------------------------------------------------------- policy

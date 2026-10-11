@@ -80,6 +80,24 @@ every route delegates, none re-implements. Notable behaviour:
   plus the inter-rater block over the overlap pairs (raw agreement
   and Cohen's kappa per family, paired disagreements side by
   side);
+- the incident clustering layer (incidents.py): ``GET
+  /api/incidents/proposals`` computes the live cluster proposals
+  over the stored runs (same product area + category, one arrival
+  window, shared words against the anchor, at least four reports;
+  the rule's constants printed on the payload), ``POST
+  /api/incidents/proposals/{id}/confirm`` / ``.../dismiss`` record
+  a named lead's act — confirmation opens an incident, dismissal
+  watermarks the member set so it never re-proposes — ``GET
+  /api/incidents`` / ``/{id}`` serve incidents with their members
+  read live from the runs, ``GET /api/incidents/{id}/additions``
+  lists the late arrivals the rule offers for an open incident,
+  ``POST /api/incidents/{id}/members`` / ``.../members/decline``
+  record the lead's per-ticket decision, and ``POST
+  /api/incidents/{id}/close`` closes an incident by name and
+  reason. Membership lives on the incident record: a member run's
+  record is never edited, and the surfaces annotate it instead —
+  a badge on the queue row, an ``incident_context`` line on the
+  run's record view, a block in the audit export;
 - ``/readiness`` fails (503) when PostgreSQL is configured but
   unreachable, and says honestly when the in-memory test doubles are
   in use (records lost on restart — fine for a look, not for work).
@@ -318,10 +336,15 @@ def analyze(ticket: TicketInput, request: Request):
 
 @app.get("/tickets/{ticket_id}")
 def get_ticket(ticket_id: str):
-    record = get_service().get_record(ticket_id)
-    if record is None:
+    # The run's record view (service.run_view): the stored record,
+    # untouched, plus its incident annotation — memberships and the
+    # open incident's context line, computed at read time from the
+    # incident records (incidents.py). The record itself is never
+    # edited by being a member of anything.
+    view = get_service().run_view(ticket_id)
+    if view is None:
         raise HTTPException(status_code=404, detail=f"unknown ticket {ticket_id!r}")
-    return record.model_dump()
+    return view
 
 
 class DecisionRequest(BaseModel):
@@ -1314,3 +1337,195 @@ def assignment_suggestion(ticket_id: str):
         return get_service().assignment_suggestion(ticket_id)
     except KeyError:
         raise HTTPException(status_code=404, detail=f"unknown ticket {ticket_id!r}")
+
+
+# ---------------------------------------------------------------------------
+# incident clustering (proposals computed, human acts stored)
+# ---------------------------------------------------------------------------
+
+
+class ClusterConfirmRequest(BaseModel):
+    actor: str = ""  # the lead confirming the cluster as one incident
+    title: str = ""  # optional rename; empty takes the composed suggestion
+
+
+class ClusterDismissRequest(BaseModel):
+    actor: str = ""
+    reason: str = ""  # why these tickets are not one event
+
+
+class IncidentMemberRequest(BaseModel):
+    ticket_id: str  # the candidate run being added / declined
+    actor: str = ""
+
+
+class IncidentDeclineRequest(BaseModel):
+    ticket_id: str
+    actor: str = ""
+    reason: str = ""  # optional on a decline; the refusal itself is the record
+
+
+class IncidentCloseRequest(BaseModel):
+    actor: str = ""
+    reason: str = ""  # the closure's basis
+
+
+def _incident_http(exc: Exception):
+    """Map an incident refusal onto its status: KeyError → 404,
+    IncidentError → its own (409 conflict / 422 invalid)."""
+    from .incidents import IncidentError
+
+    if isinstance(exc, KeyError):
+        raise HTTPException(status_code=404, detail=exc.args[0] if exc.args else str(exc))
+    if isinstance(exc, IncidentError):
+        raise HTTPException(status_code=exc.http_status, detail=str(exc))
+    raise exc
+
+
+@app.get("/api/incidents/proposals")
+def cluster_proposals():
+    """The live cluster proposals over the stored runs (incidents.py).
+
+    Computed on every read — same product area AND category, arrivals
+    inside the authored window of the group's anchor, every member
+    sharing token containment at or over the threshold with the
+    anchor, at least the authored member floor. The payload prints
+    the rule's constants, the exclusions by name (reopens, confirmed
+    duplicates, open-incident members, unplaced runs), and any
+    proposal suppressed because its exact member set was dismissed
+    before. A proposal is a view: confirming or dismissing one is
+    the stored act, under the next two routes.
+    """
+    return get_service().cluster_proposals()
+
+
+@app.post("/api/incidents/proposals/{proposal_id}/confirm", status_code=201)
+def confirm_cluster(proposal_id: str, body: ClusterConfirmRequest, request: Request):
+    """Confirm a live proposal into an incident, under a named lead.
+
+    The proposal is recomputed at confirmation — the set confirmed
+    is the set as it stands now; an id that no longer computes is a
+    409, not a stale yes. Membership lands on the new incident
+    record only: no member run's record is edited, re-routed, or
+    re-prioritised by joining. The response is the incident record.
+    """
+    require_api_key(request)
+    try:
+        incident = get_service().confirm_cluster(
+            proposal_id, actor=body.actor, title=body.title
+        )
+    except (KeyError, ValueError) as exc:
+        _incident_http(exc)
+    return incident.model_dump()
+
+
+@app.post("/api/incidents/proposals/{proposal_id}/dismiss", status_code=201)
+def dismiss_cluster(proposal_id: str, body: ClusterDismissRequest, request: Request):
+    """Dismiss a live proposal, with the lead's reason.
+
+    The dismissal stores the proposal's member set: that exact set
+    never proposes again. A set that later gains a member is new
+    evidence and may propose, naming the dismissal it outgrew.
+    The response is the dismissal record.
+    """
+    require_api_key(request)
+    try:
+        dismissal = get_service().dismiss_cluster(
+            proposal_id, actor=body.actor, reason=body.reason
+        )
+    except (KeyError, ValueError) as exc:
+        _incident_http(exc)
+    return dismissal.model_dump()
+
+
+@app.get("/api/incidents")
+def list_incidents():
+    """Every incident, open first: the record plus its members read
+    live from the runs (band, queue, status, SLA state)."""
+    return {"incidents": get_service().list_incidents()}
+
+
+@app.get("/api/incidents/{incident_id}")
+def get_incident(incident_id: str):
+    """One incident's page: the record, the members read live, and
+    the addition candidates currently waiting on a lead."""
+    try:
+        return get_service().get_incident(incident_id)
+    except KeyError:
+        raise HTTPException(
+            status_code=404, detail=f"unknown incident {incident_id!r}"
+        )
+
+
+@app.get("/api/incidents/{incident_id}/additions")
+def incident_additions(incident_id: str):
+    """The late arrivals the rule offers for one open incident:
+    same placement, words tied to the incident's anchor, inside
+    the window after its latest member. Declined tickets and
+    members never appear."""
+    try:
+        candidates = get_service().incident_additions(incident_id)
+    except KeyError:
+        raise HTTPException(
+            status_code=404, detail=f"unknown incident {incident_id!r}"
+        )
+    return {"incident_id": incident_id, "candidates": candidates}
+
+
+@app.post("/api/incidents/{incident_id}/members", status_code=201)
+def add_incident_member(incident_id: str, body: IncidentMemberRequest, request: Request):
+    """Add one candidate run to an open incident, by name.
+
+    The ticket must be a live addition candidate — the same
+    computation the additions list shows — so an add can never
+    smuggle in a ticket the rule did not offer; the refusal names
+    why it is not one (409 on a closed incident). The response is
+    the incident's page."""
+    require_api_key(request)
+    try:
+        return get_service().add_incident_member(
+            incident_id, body.ticket_id.strip(), actor=body.actor
+        )
+    except (KeyError, ValueError) as exc:
+        _incident_http(exc)
+
+
+@app.post("/api/incidents/{incident_id}/members/decline")
+def decline_incident_addition(
+    incident_id: str, body: IncidentDeclineRequest, request: Request
+):
+    """Decline one addition candidate for an incident.
+
+    The decline is stored on the incident record: the ticket is
+    never offered for this incident again, and stays eligible
+    everywhere else. Declining a ticket that is not a live
+    candidate is refused with the reason. The response is the
+    incident's page."""
+    require_api_key(request)
+    try:
+        return get_service().decline_incident_addition(
+            incident_id,
+            body.ticket_id.strip(),
+            actor=body.actor,
+            reason=body.reason,
+        )
+    except (KeyError, ValueError) as exc:
+        _incident_http(exc)
+
+
+@app.post("/api/incidents/{incident_id}/close")
+def close_incident(incident_id: str, body: IncidentCloseRequest, request: Request):
+    """Close an incident: a named act about the incident only.
+
+    No member run is decided, closed, or re-routed by the closure —
+    each member's outcome remains its own flow's business, and the
+    members become eligible evidence for future clusters again.
+    The response is the incident record."""
+    require_api_key(request)
+    try:
+        incident = get_service().close_incident(
+            incident_id, actor=body.actor, reason=body.reason
+        )
+    except (KeyError, ValueError) as exc:
+        _incident_http(exc)
+    return incident.model_dump()

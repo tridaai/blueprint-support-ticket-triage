@@ -45,7 +45,13 @@ still answer every question about the run:
   escalation rates against the category baseline, and the
   needs-review flag — the population evidence about this run's
   draft, handed in like the review verdicts, never a verdict on
-  this run itself.
+  this run itself;
+- the incident memberships (incidents.py), when this run belongs
+  to an incident: which incident, under what title, how it joined
+  and who added it — membership lives on the incident's record,
+  and the export is where a reader of one run sees that the run
+  was worked as part of an event, without the run's own record
+  carrying anything about it.
 
 Everything here is composed in code from the stored record. No
 model is consulted and no prose is generated: the text rendering is
@@ -96,6 +102,7 @@ def build_export(
     drift: dict | None = None,
     review: dict | None = None,
     template_stats: dict | None = None,
+    incident: dict | None = None,
 ) -> dict:
     """Assemble the audit document for one stored run (pure)."""
     composition = record.composition
@@ -324,6 +331,12 @@ def build_export(
         # a reader of one run meets the population evidence about
         # its draft. ``None`` when the caller computed no report.
         "template_effectiveness": template_stats,
+        # Incident clustering (incidents.py): this run's incident
+        # memberships, handed in by the service like the review
+        # block above — membership lives on the incident record,
+        # never on the run; ``None`` means the run belongs to no
+        # incident and the export is what it always was.
+        "incident": incident,
         "telemetry": record.telemetry.model_dump() if record.telemetry is not None else None,
         "trace": [step.model_dump() for step in record.trace],
         "note": (
@@ -676,6 +689,22 @@ def render_text(document: dict) -> str:
                 lines.append(f"  note: {verdict['note']}")
         lines.append(
             "The verdicts live on the review record; grading changed "
+            "nothing on this run."
+        )
+
+    incident = document.get("incident")
+    if incident:
+        lines.append("")
+        lines.append("INCIDENT (this run was worked as part of an event — incidents.py)")
+        for entry in incident["memberships"]:
+            lines.append(
+                f"{entry['incident_id']} · {entry['title']} · "
+                f"{entry['member_count']} members · {entry['status']} — "
+                f"joined via {entry['origin']}, added by "
+                f"{entry['added_by'] or 'lead'} at {entry['added_at']}"
+            )
+        lines.append(
+            "Membership lives on the incident record; it changed "
             "nothing on this run."
         )
 
