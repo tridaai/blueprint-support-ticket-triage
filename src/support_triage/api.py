@@ -18,6 +18,13 @@ every route delegates, none re-implements. Notable behaviour:
   renders the composition config as data, ``GET /queue`` filters and
   searches server-side, and ``POST /api/runs/{id}/outcome`` records
   the agent's ground truth for a handled ticket;
+- the round-3 operations surface: ``POST /api/batches`` triages a
+  list of tickets (per-ticket failures reported, never contagious),
+  ``POST /api/compare`` runs one ticket through several decision
+  backends side by side without queueing it, ``GET
+  /api/runs/{id}/similar`` finds past tickets like this one (with
+  their outcomes), and ``GET /api/events`` streams run lifecycle
+  events (SSE) from the service's in-process bus;
 - ``/readiness`` fails (503) when PostgreSQL is configured but
   unreachable, and says honestly when the in-memory test doubles are
   in use (records lost on restart — fine for a look, not for work).
@@ -25,8 +32,10 @@ every route delegates, none re-implements. Notable behaviour:
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
+import queue as queue_module
 import sys
 import time
 import uuid
@@ -35,7 +44,7 @@ from importlib import resources
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -344,6 +353,79 @@ def queue(
 @app.get("/metrics")
 def metrics():
     return get_service().metrics()
+
+
+# ---------------------------------------------------------------------------
+# batch intake + lifecycle event stream
+# ---------------------------------------------------------------------------
+
+
+@app.post("/api/batches", status_code=201)
+async def create_batch(request: Request):
+    """Triage a list of tickets: ``{"tickets": [...]}`` or a bare list.
+
+    Every ticket runs the full pipeline to its own gate. The response
+    carries one summary per ticket — queue, band, status — or that
+    ticket's error; a bad ticket never fails the batch. Batches past
+    the service cap are rejected whole (422), never silently cut.
+    """
+    require_api_key(request)
+    try:
+        payload = await request.json()
+    except Exception:
+        raise HTTPException(status_code=422, detail="request body must be JSON")
+    items = payload.get("tickets") if isinstance(payload, dict) else payload
+    if not isinstance(items, list):
+        raise HTTPException(
+            status_code=422, detail="body must be a ticket list or {\"tickets\": [...]}"
+        )
+    try:
+        return get_service().run_batch(items)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+
+
+@app.get("/api/events")
+async def events_stream(request: Request):
+    """Server-sent events for the run lifecycle, from the service bus.
+
+    Event types: ``run_completed`` (a run reached the agent gate),
+    ``guardrail_blocked`` (its guardrails failed a check),
+    ``outcome_recorded``, ``batch_completed``. The console subscribes
+    and refreshes; anything that misses an event (a dropped stream)
+    still has the plain polling endpoints — the stream is a
+    convenience, never the only path to the truth.
+    """
+    bus = get_service().bus
+    subscriber = bus.subscribe()
+
+    async def generate():
+        # NB: no request.is_disconnected() polling — under the
+        # middleware stack that call competes for the receive channel
+        # and can stall the stream. Client disconnects surface as a
+        # cancellation here instead, and the finally still unsubscribes.
+        try:
+            yield ": connected\n\n"
+            last_ping = time.monotonic()
+            while True:
+                try:
+                    event = subscriber.get_nowait()
+                except queue_module.Empty:
+                    await asyncio.sleep(0.05)
+                    if time.monotonic() - last_ping >= 15:
+                        yield ": ping\n\n"
+                        last_ping = time.monotonic()
+                    continue
+                yield f"event: {event['type']}\ndata: {json.dumps(event)}\n\n"
+                last_ping = time.monotonic()
+        finally:
+            bus.unsubscribe(subscriber)
+
+    return StreamingResponse(
+        generate(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 # ---------------------------------------------------------------------------

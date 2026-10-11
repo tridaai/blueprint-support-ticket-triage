@@ -17,13 +17,26 @@ from __future__ import annotations
 
 import json
 import time
+from datetime import datetime, timezone
 
 from langgraph.types import Command
+from pydantic import ValidationError
 
-from .events import CollectingSink, RunEvent
+from . import webhooks
+from .events import CollectingSink, EventBus, RunEvent
 from .graph import AgentRun, build_graph
 from .ports import Checkpointer, DecisionEngine, Embedder, EventSink, ObjectStore, Store, VectorIndex
 from .schemas import AgentOutcome, TicketInput, TicketResult
+from .sla import format_timestamp
+
+# A batch is an intake convenience, not a bulk-import channel: the
+# cap keeps one request from monopolising the service. Tickets past
+# the cap are rejected as a whole (a loud 422), never silently cut.
+BATCH_MAX_TICKETS = 50
+
+# Lifecycle event types on the service bus (and the SSE stream):
+# run_completed, guardrail_blocked, outcome_recorded, batch_completed.
+_WEBHOOK_EVENTS = ("run_completed", "guardrail_blocked")
 
 
 class TriageService:
@@ -43,6 +56,49 @@ class TriageService:
         self.objects = objects
         self._checkpointer = checkpointer
         self._checkpointer_ready = checkpointer is not None
+        # Lifecycle fan-out: SSE subscribers (and anything in-process)
+        # hear about completed runs, guardrail blocks, recorded
+        # outcomes, and finished batches as they happen.
+        self.bus = EventBus()
+
+    # -- lifecycle events ---------------------------------------------------
+
+    def _publish(self, event_type: str, ticket_id: str, detail: dict) -> None:
+        """Publish one lifecycle event to the bus, and fire the gate
+        webhook for the two event types it covers. Neither channel can
+        fail the caller's work: the bus never blocks, the webhook is
+        fire-and-forget."""
+        event = {
+            "type": event_type,
+            "ticket_id": ticket_id,
+            "at": format_timestamp(datetime.now(timezone.utc)),
+            "detail": detail,
+        }
+        self.bus.publish(event)
+        if event_type in _WEBHOOK_EVENTS:
+            webhooks.notify(
+                event_type,
+                {
+                    "ticket_id": ticket_id,
+                    "queue": detail.get("queue", ""),
+                    "priority_band": detail.get("priority_band", ""),
+                    "status": detail.get("status", ""),
+                    "guardrails": detail.get("guardrails", {}),
+                    "at": event["at"],
+                },
+            )
+
+    @staticmethod
+    def _guardrail_summary(result: TicketResult) -> dict:
+        return {
+            "passed": result.guardrails.passed,
+            "requires_human_review": result.guardrails.requires_human_review,
+            "failed_checks": [
+                str(check.get("name", "unknown"))
+                for check in result.guardrails.checks
+                if not check.get("passed", True)
+            ],
+        }
 
     def _get_checkpointer(self):
         """One checkpointer per service, created lazily and reused —
@@ -98,7 +154,68 @@ class TriageService:
                 detail={"status": result.status},
             )
         )
+        detail = {
+            "status": result.status,
+            "queue": result.composition.queue,
+            "priority_band": result.composition.priority_band,
+            "guardrails": self._guardrail_summary(result),
+        }
+        self._publish("run_completed", ticket.ticket_id, detail)
+        if not result.guardrails.passed:
+            # A failed check is a blocked decision path (no draft, no
+            # autonomy path): a lifecycle fact of its own, on the bus
+            # and on the webhook, not a footnote of run_completed.
+            self._publish("guardrail_blocked", ticket.ticket_id, detail)
         return AgentRun(result=result, awaiting_agent=awaiting)
+
+    def run_batch(self, items: list) -> dict:
+        """Triage a list of raw ticket payloads, one by one.
+
+        Batch intake is a loop over :meth:`run_ticket`, nothing
+        more: every ticket gets the full pipeline and its own gate.
+        A ticket that fails — malformed payload, dead provider —
+        is reported in its own entry and never sinks the batch;
+        a batch past :data:`BATCH_MAX_TICKETS` is rejected whole.
+        """
+        if len(items) > BATCH_MAX_TICKETS:
+            raise ValueError(
+                f"batch of {len(items)} exceeds the cap of {BATCH_MAX_TICKETS} tickets"
+            )
+        results: list[dict] = []
+        succeeded = 0
+        for item in items:
+            ticket_id = str(item.get("ticket_id", "")) if isinstance(item, dict) else ""
+            try:
+                ticket = TicketInput.model_validate(item)
+            except ValidationError as exc:
+                results.append(
+                    {"ticket_id": ticket_id, "status": "error", "error": f"invalid ticket: {exc}"}
+                )
+                continue
+            try:
+                run = self.run_ticket(ticket)
+            except Exception as exc:
+                results.append(
+                    {"ticket_id": ticket.ticket_id, "status": "error", "error": str(exc)}
+                )
+                continue
+            succeeded += 1
+            results.append(
+                {
+                    "ticket_id": run.result.ticket_id,
+                    "status": run.result.status,
+                    "queue": run.result.composition.queue,
+                    "priority_band": run.result.composition.priority_band,
+                    "priority_score": run.result.composition.priority_score,
+                }
+            )
+        counts = {
+            "total": len(items),
+            "succeeded": succeeded,
+            "failed": len(items) - succeeded,
+        }
+        self._publish("batch_completed", "", {"counts": counts})
+        return {"results": results, "counts": counts}
 
     def record_decision(
         self,
@@ -186,6 +303,15 @@ class TriageService:
         outcome.recorded_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
         record.outcome = outcome
         self.store.save(record)
+        self._publish(
+            "outcome_recorded",
+            ticket_id,
+            {
+                "final_category": outcome.final_category,
+                "final_queue": outcome.final_queue,
+                "resolved": outcome.resolved,
+            },
+        )
         return record
 
     def stats_overview(self) -> dict:

@@ -18,7 +18,9 @@ mode — durations are real wall-clock measurements either way.
 
 from __future__ import annotations
 
+import queue
 import sys
+import threading
 from dataclasses import dataclass, field
 from typing import Any, Callable, TextIO
 
@@ -106,3 +108,57 @@ class PrintingSink:
         elif event.type == "run_failed":
             parts.append(f"error={event.detail.get('error', '')}")
         return " · ".join(parts)
+
+
+# ---------------------------------------------------------------------------
+# lifecycle event bus (round 3): run_completed, guardrail_blocked,
+# outcome_recorded, batch_completed — the stream /api/events serves.
+# ---------------------------------------------------------------------------
+
+
+class EventBus:
+    """In-process fan-out for service lifecycle events.
+
+    Deliberately boring: a lock, a set of per-subscriber queues, and
+    plain-dict events (``type``, ``ticket_id``, ``at``, ``detail``).
+    Publishing never blocks the publisher — a slow subscriber's queue
+    is capped and drops its OLDEST events rather than stalling a
+    triage run; a dropped UI refresh is recoverable (the console
+    polls as a fallback), a stalled pipeline is not.
+    """
+
+    def __init__(self, maxsize: int = 256) -> None:
+        self._maxsize = maxsize
+        self._lock = threading.Lock()
+        self._subscribers: set[queue.Queue] = set()
+
+    def subscribe(self) -> queue.Queue:
+        subscriber: queue.Queue = queue.Queue(maxsize=self._maxsize)
+        with self._lock:
+            self._subscribers.add(subscriber)
+        return subscriber
+
+    def unsubscribe(self, subscriber: queue.Queue) -> None:
+        with self._lock:
+            self._subscribers.discard(subscriber)
+
+    @property
+    def subscriber_count(self) -> int:
+        with self._lock:
+            return len(self._subscribers)
+
+    def publish(self, event: dict) -> None:
+        with self._lock:
+            subscribers = list(self._subscribers)
+        for subscriber in subscribers:
+            try:
+                subscriber.put_nowait(event)
+            except queue.Full:
+                try:
+                    subscriber.get_nowait()  # drop the oldest, keep the newest
+                except queue.Empty:
+                    pass
+                try:
+                    subscriber.put_nowait(event)
+                except queue.Full:
+                    pass

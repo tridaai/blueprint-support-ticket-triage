@@ -3,6 +3,7 @@
     support-triage samples                       # the bundled synthetic tickets
     support-triage run SUP-1002                  # triage one sample to the gate
     support-triage run --file ticket.json        # triage a ticket file
+    support-triage batch --file tickets.json     # triage a whole list at once
     support-triage decide SUP-1002 --decision approved --by agent-1
     support-triage queue                         # what's waiting on agents
     support-triage show SUP-1002                 # the full decision record
@@ -56,6 +57,9 @@ def main(argv: list[str] | None = None) -> int:
 
     sub.add_parser("queue", help="tickets waiting on an agent")
 
+    batch_parser = sub.add_parser("batch", help="triage a JSON file of tickets (a list, or {\"tickets\": [...]})")
+    batch_parser.add_argument("--file", required=True, help="path to the ticket-list JSON file")
+
     show_parser = sub.add_parser("show", help="the full decision record for a ticket")
     show_parser.add_argument("ticket_id")
 
@@ -93,6 +97,29 @@ def main(argv: list[str] | None = None) -> int:
             f"status {result.status}"
         )
         return 0
+
+    if args.command == "batch":
+        payload = json.loads(Path(args.file).read_text(encoding="utf-8"))
+        items = payload.get("tickets") if isinstance(payload, dict) else payload
+        if not isinstance(items, list):
+            print("error: the file must hold a ticket list or {\"tickets\": [...]}")
+            return 1
+        try:
+            outcome = service.run_batch(items)
+        except ValueError as exc:
+            print(f"error: {exc}")
+            return 1
+        for entry in outcome["results"]:
+            if entry["status"] == "error":
+                print(f"{entry['ticket_id'] or '(no id)'}: ERROR — {entry['error']}")
+            else:
+                print(
+                    f"{entry['ticket_id']}: → {entry['queue']} · "
+                    f"priority {entry['priority_score']} ({entry['priority_band']}) · {entry['status']}"
+                )
+        counts = outcome["counts"]
+        print(f"\nbatch: {counts['succeeded']}/{counts['total']} triaged, {counts['failed']} failed")
+        return 0 if counts["failed"] == 0 else 1
 
     if args.command == "decide":
         try:
