@@ -186,6 +186,60 @@ client-side over fetched records and persists nothing: it answers
 "what would this threshold do to today's queue?" without giving a
 hypothetical the power to touch a real record.
 
+## Events, comparisons, and SLA clocks
+
+**The event bus** (`events.py: EventBus`, owned by the service) is
+the round-3 addition underneath everything live. The service
+publishes four lifecycle events as plain dicts — `run_completed`
+(a run reached the gate), `guardrail_blocked` (its guardrails
+failed a check — a blocked draft/autonomy path is a lifecycle fact,
+not a footnote of completion), `outcome_recorded`, and
+`batch_completed`. Publishing never blocks: subscriber queues are
+capped and drop their oldest events, because a stalled pipeline is
+worse than a missed UI refresh. `GET /api/events` is a
+`StreamingResponse` over one subscription (dependency-free SSE; the
+console falls back to polling when the stream cannot be held).
+Gate webhooks (`webhooks.py`) ride the same two gate events:
+fire-and-forget POSTs on a daemon thread with a 3-second timeout,
+failures logged and forgotten. Neither channel is load-bearing —
+the record in the store is the truth, and both channels exist to
+save a human a refresh.
+
+**Batch intake** is intentionally not a new pipeline: it is a loop
+over `run_ticket` in the service, with validation and provider
+failures captured per ticket. The cap (50) is a whole-batch 422 —
+silently truncating an intake would lose tickets without a trace,
+which is the one failure shape this blueprint never chooses.
+
+**Comparisons** (`compare.py`) share exactly one pipeline step with
+a run — the injection screen — and deliberately skip the rest of
+the graph: no duplicate check (a comparison must not teach the
+index), no gate, no record. Each backend's raw answers go through
+the port validation and the same `compose` + guardrails code, so a
+column difference is attributable to the decision model alone.
+Records are archived to the object store under `comparisons/` —
+they are experiments with a different lifecycle from run records,
+and putting them in the queue's table (or a new migration) would
+blur exactly that line.
+
+**Similar tickets** reuse the duplicate check's port (`Embedder` +
+`VectorIndex`, so pgvector and the in-memory double behave alike)
+with a different question and a lower floor (0.30 vs the duplicate
+threshold's 0.85): not "is this the same ticket?" but "what
+happened to tickets like this?" The answer joins each neighbour's
+record to its outcome when one exists — the loop the outcome
+endpoints opened, closed in the other direction.
+
+**SLA clocks vs SLA risk** is the naming discipline the code
+enforces. `sla_breach_risk` is a model judgement — a distribution,
+an input to the priority formula, calibrated like every other
+question. The SLA *clock* (`sla.py`) is arithmetic: the band's
+target from `SLA_TARGET_HOURS` minus the ticket's age since
+`received_at`, reported as ok / due_soon (last quarter of the
+target) / breached. The clock takes `now` as a parameter everywhere
+so its tests are exact; it never consults the model, and the
+model's risk answer never moves a target.
+
 ## What the agent will never do
 
 - **Send anything to a customer.** No node in the graph has that

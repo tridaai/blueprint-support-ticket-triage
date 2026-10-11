@@ -105,8 +105,8 @@ Or natively, offline, in about a minute:
 ```bash
 uv sync --extra dev        # or, without uv: make install-pip
 make demo                  # one ticket, traced end to end
-make test                  # 94 tests
-make evals                 # golden routing 36/36 · calibration gates pass
+make test                  # 157 tests
+make evals                 # golden routing 44/44 · calibration gates pass
 make serve                 # API + console on :8000
 ```
 
@@ -152,14 +152,14 @@ exists for tests and offline demos only. A deployment always sets
 
 Two packs, both deterministic offline:
 
-- **Golden routing set** (`evals/run_evals.py`) — 36 synthetic tickets
+- **Golden routing set** (`evals/run_evals.py`) — 44 synthetic tickets
   with authored category, queue, priority band, and safety flags.
-  Gate: ≥ 95%. Current: **36/36**.
+  Gate: ≥ 95%. Current: **44/44**.
 - **Calibration pack** (`evals/run_calibration.py`) — the headline
   eval for a decision system: reliability bins and Brier scores per
-  question against the golden truths. Verify Briers ≤ 0.013, category
-  Brier 0.083, score high-event Briers ≤ 0.014, expected-score MAE
-  ≤ 1.25, worst reliability-bin gap 0.146. Per-kind gates (the kinds
+  question against the golden truths. Verify Briers ≤ 0.014, category
+  Brier 0.103, score high-event Briers ≤ 0.018, expected-score MAE
+  ≤ 1.10, worst reliability-bin gap 0.143. Per-kind gates (the kinds
   have different units; the runner's docstring explains). With
   `EVAL_LIVE=1` the configured live backend answers instead and the
   metrics are reported, never gated.
@@ -218,6 +218,63 @@ eval pack (`calibration.py`), and reports category/queue accuracy
 and resolution rate alongside. With no outcomes recorded, the panel
 says exactly that — there is no synthetic stand-in for ground truth.
 
+## Batch, compare, similar tickets, SLA clocks, events, webhooks
+
+The operations surface around the pipeline:
+
+- **Batch intake** — `POST /api/batches` takes a ticket list (or
+  `{"tickets": [...]}`) up to a cap of 50 and triages each through
+  the full pipeline, returning per-ticket summaries (queue, band,
+  status) and counts. A malformed ticket or a dead provider is
+  reported in that ticket's own entry; it never sinks the batch.
+  A batch past the cap is rejected whole. The console has a batch
+  paste box; the CLI has `support-triage batch --file tickets.json`.
+- **Backend comparison** — `POST /api/compare` runs one ticket's
+  decision + composition under several backends side by side
+  (offline always; jev / llm / provider aliases when configured —
+  an unconfigured backend answers with an error column). The ticket
+  is screened like a run but **not queued**: no run record, no gate,
+  no duplicate-index entry. The response carries per-backend latency,
+  answers, priority, queue and guardrail verdicts, plus a diff
+  against the first backend that answered — category and queue
+  flips, band changes, flag flips, review-forcing. Comparisons are
+  archived as their own records in the object store
+  (`GET /api/compare/{id}`), apart from the queue. The console's
+  **Compare backends** view renders the columns with disagreements
+  highlighted.
+- **Similar past tickets** — the ticket view lists the nearest past
+  tickets from the same embedding index the duplicate check uses
+  (`GET /api/runs/{id}/similar`, floor 0.30, tunable via
+  `SIMILARITY_FLOOR`), each with its triage and — when an agent
+  recorded one — its outcome: what tickets like this one turned out
+  to be, and whether they resolved.
+- **SLA clocks** — every priority band carries a deterministic
+  target (critical 1h, high 4h, medium 24h, low 72h; in
+  `composition.py`, exposed via `GET /api/policy`). Open tickets
+  show `sla_state` (ok / due_soon / breached), age and time-to-breach
+  on the queue and as console chips, and the Queue health panel
+  counts breaches. The clock is arithmetic over the ticket's age;
+  it is deliberately distinct from `sla_breach_risk`, which remains
+  the *model's* judgement and an input to the priority formula.
+- **Live updates (SSE)** — `GET /api/events` streams the service's
+  lifecycle events (`run_completed`, `guardrail_blocked`,
+  `outcome_recorded`, `batch_completed`) from an in-process bus.
+  The console subscribes and refreshes the queue and dashboards;
+  if the stream drops, it falls back to polling — the stream is a
+  convenience, never the only path to the truth. (With `API_KEY`
+  set, `EventSource` cannot send the key header, so the console's
+  polling fallback is what carries it.)
+- **Gate webhooks** — set `TRIAGE_WEBHOOK_URL` (and optionally
+  `TRIAGE_WEBHOOK_SECRET`, sent as a header) and the service POSTs a
+  compact JSON event when a run reaches the agent gate and when its
+  guardrails block. Delivery is fire-and-forget with a short
+  timeout: a dead receiver is logged, never fatal, and never slows
+  a run.
+
+No new storage was needed for any of this: comparisons live in the
+object store next to the archived ticket payloads, so the migration
+list is unchanged (0001–0003).
+
 ## Honest status
 
 - **Jev is early access.** The adapter is written to TypeSafe's
@@ -253,6 +310,10 @@ src/support_triage/
   embeddings.py   embedders + vector index (duplicate check)
   calibration.py  reliability bins + Brier math for the eval pack
   livecal.py      agent outcomes -> live calibration (same math)
+  compare.py      one ticket under several backends, diffed, unqueued
+  sla.py          the deterministic SLA clock (band targets vs age)
+  events.py       run events + the lifecycle bus behind /api/events
+  webhooks.py     fire-and-forget gate webhooks (TRIAGE_WEBHOOK_URL)
   stats.py        overview + per-backend performance aggregates
   store.py        records: PostgresStore / InMemoryStore (double)
   objectstore.py  S3 payloads (stdlib SigV4) / in-memory double

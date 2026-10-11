@@ -23,7 +23,7 @@ def _load(name: str):
 def test_golden_cases_all_pass_the_pipeline_checks():
     runner = _load("run_evals")
     cases = runner.load_cases()
-    assert len(cases) == 36
+    assert len(cases) == 44
     failures = {}
     for case in cases:
         result = runner.run_case(runner.fresh_service(), case)

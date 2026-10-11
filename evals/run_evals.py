@@ -1,7 +1,10 @@
 """Golden routing eval: known tickets in, routing truth checked.
 
-Thirty-six synthetic tickets with authored expectations — category,
+Forty-four synthetic tickets with authored expectations — category,
 queue, priority band, and the five safety/engineering verify flags.
+(36 through round 2; round 3 added multi-issue tickets, three more
+injection phrasings, a calm ticket that must stay low, a repeat
+outage follow-up, and an abuse-plus-legal combination.)
 Each case runs the full pipeline (screen → duplicate → one decision
 call → composition → guardrails) through a fresh service, on the
 deterministic offline backend by default, so the gate is hermetic:
