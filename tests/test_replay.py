@@ -52,7 +52,7 @@ class ScriptedEngine:
     def __init__(self, by_marker: dict):
         self.by_marker = by_marker
 
-    def decide(self, state, questions):
+    def decide(self, state, questions, context=""):
         overrides = {}
         for marker, candidate in self.by_marker.items():
             if marker in state:
@@ -217,7 +217,7 @@ def test_replay_never_calls_a_backend():
     class ExplodingEngine:
         name = "exploding"
 
-        def decide(self, state, questions):  # noqa: ARG002
+        def decide(self, state, questions, context=""):  # noqa: ARG002
             raise AssertionError("replay must never call a decision backend")
 
     service.engine = ExplodingEngine()

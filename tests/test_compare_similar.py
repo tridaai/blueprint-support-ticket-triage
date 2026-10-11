@@ -42,7 +42,7 @@ class TechnicalStubEngine:
     name = "stub"
     model = "stub-v1"
 
-    def decide(self, state, questions):
+    def decide(self, state, questions, context=""):
         raw = valid_answers(
             category={"probabilities": {
                 "technical_issue": 0.9, "billing": 0.02, "account_access": 0.02,

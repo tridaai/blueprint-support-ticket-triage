@@ -88,7 +88,7 @@ def test_batch_reports_a_failing_run_per_ticket(service):
     class ExplodingEngine:
         name = "exploding"
 
-        def decide(self, state, questions):
+        def decide(self, state, questions, context=""):
             raise ProviderError("backend is down")
 
     service.engine = ExplodingEngine()
@@ -162,7 +162,7 @@ def test_guardrail_blocked_is_published_for_an_indecisive_run(service):
     class IndecisiveEngine:
         name = "indecisive"
 
-        def decide(self, state, questions):
+        def decide(self, state, questions, context=""):
             raw = valid_answers()
             options = [o for o in raw["category"]["probabilities"]]
             raw["category"] = {"probabilities": {o: 1.0 / len(options) for o in options}}

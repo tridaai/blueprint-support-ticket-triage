@@ -22,6 +22,8 @@ a named agent. **Nothing is ever sent to a customer by this system.**
 > synthetic. The TypeSafe (Jev) adapter targets an early-access API —
 > see *Honest status* below.
 
+> **Work in progress** — this blueprint is built and passing its automated test and eval gates, but it has not yet finished hands-on local testing, and its companion blog post is not yet published. Expect changes. This notice comes off when both are done.
+
 <p align="center">
   <img alt="Python 3.10–3.12" src="https://img.shields.io/badge/python-3.10--3.12-4F46E5">
   <img alt="License: Apache 2.0" src="https://img.shields.io/badge/license-Apache%202.0-4F46E5">
@@ -105,8 +107,8 @@ Or natively, offline, in about a minute:
 ```bash
 uv sync --extra dev        # or, without uv: make install-pip
 make demo                  # one ticket, traced end to end
-make test                  # 202 tests
-make evals                 # golden routing 44/44 · calibration gates pass
+make test                  # 226 tests
+make evals                 # golden routing 48/48 · calibration gates pass
 make serve                 # API + console on :8000
 ```
 
@@ -152,15 +154,19 @@ exists for tests and offline demos only. A deployment always sets
 
 Two packs, both deterministic offline:
 
-- **Golden routing set** (`evals/run_evals.py`) — 44 synthetic tickets
-  with authored category, queue, priority band, and safety flags.
-  Gate: ≥ 95%. Current: **44/44**.
+- **Golden routing set** (`evals/run_evals.py`) — 48 synthetic tickets
+  with authored category, queue, priority band, and safety flags —
+  including the reopen cases (a reopened how_to that must not get a
+  template draft, a floor-raised band, a chain that hits the reopen
+  limit) and a thread near-miss that must stay separate.
+  Gate: ≥ 95%. Current: **48/48**.
 - **Calibration pack** (`evals/run_calibration.py`) — the headline
   eval for a decision system: reliability bins and Brier scores per
   question against the golden truths. Verify Briers ≤ 0.014, category
-  Brier 0.103, score high-event Briers ≤ 0.018, expected-score MAE
-  ≤ 1.10, worst reliability-bin gap 0.143. Per-kind gates (the kinds
-  have different units; the runner's docstring explains). With
+  Brier 0.097, score high-event Briers ≤ 0.018, expected-score MAE
+  ≤ 1.10, worst reliability-bin gap 0.248. Per-kind gates (the kinds
+  have different units; the runner's docstring explains). Reopen
+  cases sample their final reopened run. With
   `EVAL_LIVE=1` the configured live backend answers instead and the
   metrics are reported, never gated.
 
@@ -289,6 +295,60 @@ for whoever has to answer for it:
   text anywhere in it. The console's decision record carries
   Export buttons for both formats.
 
+## Reopens and conversation threads
+
+Tickets have a life after the first pass. A resolution fails, the
+customer writes back — and until now the outcome could say
+"not resolved" and nothing happened next. Two mechanisms close
+that loop, both enforced in code:
+
+- **Reopen flow** — `POST /api/runs/{id}/reopen` takes the
+  customer's follow-up message (and the agent logging it) and
+  creates a **new run linked to the old one** (`prior_run_id`,
+  `reopen_count` on the record; the original record is never
+  mutated — pinned byte-identical by test). The reopen re-enters
+  the same pipeline with three differences, all code, all visible
+  on the new record and in its audit export:
+  - **Context.** The decision call receives the prior run's
+    answers, routing, decision, and recorded outcome as context
+    through the port. The LLM adapter adds it to the prompt as a
+    fenced *prior handling history* block — historical record,
+    outside the untrusted-ticket fence; the Jev adapter sends it
+    as the request's own `context` field; the offline backend
+    ignores it deterministically, and the record says so
+    (`context_use` is `history_block` or `ignored_offline` — no
+    silent differences). The injection screen runs on the new
+    customer message exactly as on any intake.
+  - **No second template.** Template first-response drafting is
+    disabled for reopen runs in the draft builder itself — a
+    customer whose issue already failed once never gets the
+    canned path again. The autonomy recommendation carries the
+    matching blocker.
+  - **Priority floor + reopen limit.** Composition floors a
+    reopen's band one step up (score untouched; the raise is its
+    own line in the composition trace, like the outage boost).
+    A chain that reaches `REOPEN_LIMIT` (default 2,
+    env-overridable) is forced to human review by a dedicated
+    guardrail check instead of being composed again. SSE and
+    webhook surfaces treat the reopen run as a normal run
+    completion — no separate plumbing.
+- **Conversation threads** — runs are grouped at intake by a
+  deterministic function (`threads.py`, constants on the policy
+  surface): same customer (normalised email, else name) +
+  subject/body token containment at or over 0.35 + the earlier
+  run within 30 days → the same `thread_id` (`thr-<root ticket
+  id>`, carried on the record JSON — no migration). A reopen
+  joins its prior run's thread by construction. Grouping only
+  labels: it never merges, edits, or re-routes a run, and a
+  ticket under the threshold starts a new thread even from the
+  same customer (the near-miss is pinned by test and by golden
+  case G48). `GET /api/threads` lists threads with run counts,
+  open/reopened state, and the latest outcome; `GET
+  /api/threads/{id}` and `GET /api/runs/{id}/thread` return the
+  chain — every run in order, each with its outcome. The console
+  has a Threads view, a thread chain and reopen form on the
+  decision record, and the reopen facts in the record itself.
+
 ## Batch, compare, similar tickets, SLA clocks, events, webhooks
 
 The operations surface around the pipeline:
@@ -386,6 +446,7 @@ src/support_triage/
   assignment.py   advisory assignee ranking — reasons printed, never writes
   replay.py       policy impact replay over stored runs — never writes
   exports.py      one run as a portable audit document (JSON + text)
+  threads.py      conversation threads: deterministic grouping, labels only
   compare.py      one ticket under several backends, diffed, unqueued
   sla.py          the deterministic SLA clock (band targets vs age)
   events.py       run events + the lifecycle bus behind /api/events

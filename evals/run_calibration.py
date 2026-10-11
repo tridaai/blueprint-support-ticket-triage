@@ -62,7 +62,9 @@ def collect_samples(engine=None) -> tuple[list[dict], str]:
     backend_name = "offline"
     for case in cases:
         service = fresh_service(engine)
-        result = run_case(service, case)
+        # Reopen cases sample their final reopened run — its answers
+        # are what the case's `expected` block describes.
+        result, _chain_failures = run_case(service, case)
         backend_name = result.telemetry.backend if result.telemetry else backend_name
         expected = case["expected"]
         sample: dict = {"verify": {}, "choice": {}, "score": {}}

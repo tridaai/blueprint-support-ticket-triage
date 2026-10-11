@@ -167,7 +167,7 @@ def test_failed_run_is_logged_as_error_telemetry():
     class ExplodingEngine:
         name = "exploding"
 
-        def decide(self, state, questions):  # noqa: ARG002
+        def decide(self, state, questions, context=""):  # noqa: ARG002
             raise ProviderError("provider is down")
 
     service = fresh_service(engine=ExplodingEngine())

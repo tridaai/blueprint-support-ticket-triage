@@ -266,6 +266,65 @@ weight and its points, and a `score_check` boolean reconciles the
 term total plus boost against the recorded score — an export that
 doesn't add up says so on its face instead of rounding quietly.
 
+## Reopens and conversation threads
+
+**The reopen** (`service.reopen_run`, graph reopen state) is how a
+run's story continues. The follow-up message becomes a new ticket
+— `<root>-R<count>` ids, suffixed rather than overwritten when a
+branch collides — whose intake fields carry over from the prior
+run's stored input (store copy, else the object-store archive,
+else the record's own fields). The prior run is never written to
+again; the link (`ReopenInfo` on the new record: prior id, chain
+root, count, the limit in force, who logged it) rides the record
+JSON, so no migration was needed — the same precedent as outcomes.
+
+Three consequences are enforced where they can't be prompted away:
+
+- **Context through the port.** `DecisionEngine.decide` takes an
+  optional `context` — the prior run's record composed by code
+  (answers with confidences, routing, the agent's decision, the
+  recorded outcome with its truths). The adapters decide what the
+  channel honestly supports: the LLM adapter appends it to the
+  prompt as a fenced prior-history block (`screening.fence_history`)
+  *after* the untrusted fence closes; the Jev adapter sends it as
+  a separate `context` field, never folded into the ticket state;
+  the offline backend ignores it, deterministically, and
+  `ReopenInfo.context_use` records which behaviour the run got.
+  The injection screen runs on the follow-up message in the intake
+  node, exactly as on a first pass — history is context, the new
+  message is still untrusted customer text.
+- **No second template.** `build_template_draft` refuses reopen
+  runs as its first check, and the autonomy recommender gains the
+  matching blocker, so no call site can re-enable the canned path
+  for a customer whose issue already failed once.
+- **Floor and limit in composition/guardrails.** `compose(...,
+  reopen=True)` raises the composed band one step after the score
+  is fixed (`band_before_floor` is recorded; the export and the
+  console render it as its own line, like the outage boost).
+  `run_guardrails` gains a `reopen_limit` check: a run whose count
+  reaches the limit in force (`REOPEN_LIMIT`, default 2, read like
+  the other policy constants) fails that check and is forced to
+  human review with the reason named. Replay passes each record's
+  stored count/limit through, so the identity property (an empty
+  hypothetical moves nothing) holds over reopen runs too.
+
+**Threads** (`threads.py`) group runs into conversations with one
+deterministic function at intake. The customer key is the
+normalised sender email, falling back to the normalised name;
+unknown customers never thread. Similarity is token containment
+of the subject+body content tokens — shared tokens over the
+smaller set — chosen over Jaccard because a follow-up is usually
+much shorter than the ticket it continues and Jaccard scores
+brevity as unrelatedness. At or over 0.35, with the earlier run
+inside 30 days, the best candidate (ties toward the most recent)
+lends its thread id; the thread id is the root's, `thr-<ticket
+id>`, and lives on the record JSON. A reopen skips derivation and
+joins its prior run's thread directly. The read side
+(`thread_summaries` / `thread_chain`) assembles summaries and
+chains from the records at read time: run counts, open runs,
+whether the thread was ever reopened, the latest outcome — pure
+reads that leave every record byte-identical.
+
 ## Events, comparisons, and SLA clocks
 
 **The event bus** (`events.py: EventBus`, owned by the service) is
