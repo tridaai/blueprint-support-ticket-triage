@@ -538,3 +538,56 @@ def eval_results():
 @app.get("/calibration/results")
 def calibration_results():
     return _results_payload("calibration_results.json", "calibration")
+
+
+# ---------------------------------------------------------------------------
+# backend comparison + similar tickets
+# ---------------------------------------------------------------------------
+
+
+class CompareRequest(BaseModel):
+    ticket: TicketInput
+    backends: list[str] | None = None
+
+
+@app.post("/api/compare", status_code=201)
+def create_comparison(body: CompareRequest, request: Request):
+    """One ticket, several decision backends, side by side.
+
+    An experiment, not a triage: the ticket is NOT queued and no run
+    record is created (the duplicate index is untouched too). The
+    comparison is archived as its own record and read back at
+    ``GET /api/compare/{comparison_id}``. A backend that is not
+    configured answers with an error column, reported — the other
+    columns still stand.
+    """
+    require_api_key(request)
+    from .compare import CANDIDATE_BACKENDS
+
+    unknown = [b for b in (body.backends or []) if b not in CANDIDATE_BACKENDS]
+    if unknown:
+        raise HTTPException(
+            status_code=422,
+            detail=f"unknown backends {unknown}; candidates are {list(CANDIDATE_BACKENDS)}",
+        )
+    return get_service().compare(body.ticket, body.backends)
+
+
+@app.get("/api/compare/{comparison_id}")
+def get_comparison(comparison_id: str):
+    payload = get_service().get_comparison(comparison_id)
+    if payload is None:
+        raise HTTPException(status_code=404, detail=f"unknown comparison {comparison_id!r}")
+    return payload
+
+
+@app.get("/api/runs/{ticket_id}/similar")
+def similar_tickets(ticket_id: str, limit: int = 5):
+    """Past tickets nearest to this one (embedding index), each with
+    its recorded outcome when an agent has recorded one."""
+    if limit < 1 or limit > 20:
+        raise HTTPException(status_code=422, detail="limit must be between 1 and 20")
+    try:
+        return get_service().similar_tickets(ticket_id, limit=limit)
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"unknown ticket {ticket_id!r}")

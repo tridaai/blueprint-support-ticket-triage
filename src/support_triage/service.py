@@ -34,6 +34,11 @@ from .sla import format_timestamp
 # the cap are rejected as a whole (a loud 422), never silently cut.
 BATCH_MAX_TICKETS = 50
 
+# The floor for "similar past tickets" (service.similar_tickets):
+# well below the duplicate threshold (0.85) — a neighbour worth
+# learning from, not a re-send. Env-tunable per deployment.
+SIMILARITY_FLOOR = 0.30
+
 # Lifecycle event types on the service bus (and the SSE stream):
 # run_completed, guardrail_blocked, outcome_recorded, batch_completed.
 _WEBHOOK_EVENTS = ("run_completed", "guardrail_blocked")
@@ -287,6 +292,114 @@ class TriageService:
             return TicketResult.model_validate(final["result"])
         except Exception:
             return None
+
+    # -- comparison + similar (experiments and neighbours, not runs) -------
+
+    def compare(self, ticket: TicketInput, backend_names: list[str] | None = None) -> dict:
+        """Run one ticket through several decision backends (compare.py).
+
+        An experiment, not a triage: nothing is queued, gated, or
+        added to the duplicate index. The comparison record is
+        archived to the object store, apart from the run records.
+        """
+        from .compare import compare_ticket
+
+        payload = compare_ticket(ticket, backend_names)
+        try:
+            self.objects.put(
+                f"comparisons/{payload['comparison_id']}.json",
+                json.dumps(payload, indent=2).encode("utf-8"),
+                "application/json",
+            )
+        except Exception:
+            pass  # the caller has the payload; the archive is a copy
+        return payload
+
+    def get_comparison(self, comparison_id: str) -> dict | None:
+        """Read back an archived comparison record, if it exists."""
+        try:
+            raw = self.objects.get(f"comparisons/{comparison_id}.json")
+        except Exception:
+            return None
+        if raw is None:
+            return None
+        try:
+            return json.loads(raw)
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            return None
+
+    def similar_tickets(self, ticket_id: str, limit: int = 5) -> dict:
+        """Past tickets nearest to this one, with their outcomes.
+
+        Uses the same embedder + vector index as the duplicate
+        check (the port both the in-memory index and pgvector
+        implement), but reads further down the neighbour list and
+        keeps everything over the similarity floor — where the
+        duplicate check asks "is this the same ticket again?", this
+        asks "what happened to tickets like this one?". A neighbour's
+        recorded outcome (final category/queue, resolved) rides
+        along; no outcome is shown as ``None``, never invented.
+        """
+        from .config import env_float
+
+        record = self.store.get(ticket_id)
+        if record is None:
+            raise KeyError(f"unknown ticket {ticket_id!r}")
+        floor = env_float("SIMILARITY_FLOOR", SIMILARITY_FLOOR)
+        vector = self.embedder.embed(self._ticket_text(ticket_id, record))
+        neighbours = self.index.nearest(
+            vector, exclude_id=ticket_id, limit=max(limit * 3, limit)
+        )
+        items: list[dict] = []
+        for other_id, similarity in neighbours:
+            if float(similarity) < floor:
+                continue
+            other = self.store.get(other_id)
+            if other is None:
+                continue
+            outcome = None
+            if other.outcome is not None:
+                outcome = {
+                    "final_category": other.outcome.final_category,
+                    "final_queue": other.outcome.final_queue,
+                    "resolved": other.outcome.resolved,
+                    "recorded_by": other.outcome.recorded_by,
+                }
+            items.append(
+                {
+                    "ticket_id": other.ticket_id,
+                    "similarity": round(float(similarity), 4),
+                    "subject": other.subject,
+                    "category": other.category,
+                    "queue": other.composition.queue,
+                    "priority_band": other.composition.priority_band,
+                    "status": other.status,
+                    "outcome_recorded": other.outcome is not None,
+                    "outcome": outcome,
+                }
+            )
+            if len(items) >= limit:
+                break
+        return {"ticket_id": ticket_id, "floor": floor, "similar": items}
+
+    def _ticket_text(self, ticket_id: str, record: TicketResult) -> str:
+        """The text a ticket is embedded by: its stored input when
+        the store kept it, the archived payload in production, and
+        the record's subject as the last resort."""
+        stored = self.store.get_input(ticket_id)
+        if stored is not None:
+            return f"{stored.subject}\n{stored.body}"
+        try:
+            raw = self.objects.get(f"tickets/{ticket_id}.json")
+        except Exception:
+            raw = None
+        if raw:
+            try:
+                payload = json.loads(raw)
+                return f"{payload.get('subject', '')}\n{payload.get('body', '')}"
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                pass
+        return record.subject
 
     # -- outcomes + stats ----------------------------------------------------
 
