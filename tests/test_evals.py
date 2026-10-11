@@ -23,7 +23,7 @@ def _load(name: str):
 def test_golden_cases_all_pass_the_pipeline_checks():
     runner = _load("run_evals")
     cases = runner.load_cases()
-    assert len(cases) == 61
+    assert len(cases) == 63
     failures = {}
     for case in cases:
         if "qa_sample" in case:

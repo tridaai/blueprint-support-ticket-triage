@@ -1,6 +1,6 @@
 """Golden routing eval: known tickets in, routing truth checked.
 
-Sixty-one synthetic tickets with authored expectations — category,
+Sixty-three synthetic tickets with authored expectations — category,
 queue, priority band, and the five safety/engineering verify flags.
 (36 through round 2; round 3 added multi-issue tickets, three more
 injection phrasings, a calm ticket that must stay low, a repeat
@@ -26,7 +26,13 @@ exact evidence both at triage (on the new run's record) and in
 the dossier read model, a below-threshold customer with neither
 flag and the resolved rate honestly withheld, and an operator
 detach that moves the ticket between the dossier's thread rows,
-the dossier itself pinned as a pure projection.)
+the dossier itself pinned as a pure projection; the inter-rater
+round added the paired-grading cases — an overlap draw asserted
+exactly with its assignment, a third reviewer refused off the
+overlap set while the open line holds off it, and a twelve-run
+double-graded world whose per-family Cohen's kappas are asserted
+to the decimal, including the no-variance family whose kappa is
+honestly null.)
 Each case runs the full pipeline (screen → duplicate → one decision
 call → composition → guardrails) through a fresh service, on the
 deterministic offline backend by default, so the gate is hermetic:
@@ -457,7 +463,7 @@ def check_case(case: dict, result) -> list[str]:
 
 
 def check_review_case(service: TriageService, case: dict) -> list[str]:
-    """QA-review cases (round 8): grading the triage itself.
+    """QA-review cases (rounds 8 + 10): grading the triage itself.
 
     Seeds a world of runs, decides them at the gate (the review
     population is decided runs — the store's own word), optionally
@@ -468,9 +474,15 @@ def check_review_case(service: TriageService, case: dict) -> list[str]:
     (``expect_error`` names the refusal a correct implementation
     must raise), and the agreement report is graded on its math:
     per-family rates, the per-backend split, the disagreement
-    count, the withheld rate below the floor. When the case asks
-    for the pins, the run records and the live calibration payload
-    are snapshotted before the verdicts and must be byte-identical
+    count, the withheld rate below the floor. A case may also state
+    an ``overlap`` on the sample — the two reviewers, a count or
+    fraction, the exact assigned run ids — which the redraw must
+    reproduce too, and grade the report's ``inter_rater`` block:
+    pair accounting, per-family raw agreement and Cohen's kappa
+    (``null`` where undefined, with the note naming why), and the
+    paired disagreement count. When the case asks for the pins,
+    the run records and the live calibration payload are
+    snapshotted before the verdicts and must be byte-identical
     after — grading a triage changes nothing about it.
     """
     failures: list[str] = []
@@ -491,11 +503,20 @@ def check_review_case(service: TriageService, case: dict) -> list[str]:
             )
 
     spec = case["qa_sample"]
+    overlap_spec = spec.get("overlap") or {}
+    overlap_kwargs = {}
+    if overlap_spec:
+        overlap_kwargs = {
+            "overlap_reviewers": overlap_spec["reviewers"],
+            "overlap_count": overlap_spec.get("count"),
+            "overlap_fraction": overlap_spec.get("fraction"),
+        }
     sample = service.create_review_sample(
         size=spec["size"],
         seed=spec.get("seed", 0),
         created_by="eval-qa",
         exclude_previously_reviewed=spec.get("exclude_previously_reviewed", True),
+        **overlap_kwargs,
     )
     expect_ids = spec.get("expect_run_ids")
     if expect_ids is not None and sample.run_ids != expect_ids:
@@ -503,6 +524,19 @@ def check_review_case(service: TriageService, case: dict) -> list[str]:
             f"sampler drew {sample.run_ids}, expected exactly {expect_ids} "
             "(same store + seed + size must reproduce the same sample)"
         )
+    if overlap_spec:
+        if sample.overlap.get("reviewers") != overlap_spec["reviewers"]:
+            failures.append(
+                f"sample overlap reviewers = {sample.overlap.get('reviewers')}, "
+                f"expected {overlap_spec['reviewers']}"
+            )
+        expect_overlap = overlap_spec.get("expect_run_ids")
+        if expect_overlap is not None and sample.overlap.get("run_ids") != expect_overlap:
+            failures.append(
+                f"sampler assigned the overlap to {sample.overlap.get('run_ids')}, "
+                f"expected exactly {expect_overlap} (the assignment is part of "
+                "the seeded draw and must reproduce with it)"
+            )
     for key, wanted in spec.get("expect_population", {}).items():
         if sample.population.get(key) != wanted:
             failures.append(
@@ -512,10 +546,16 @@ def check_review_case(service: TriageService, case: dict) -> list[str]:
         redraw = service.create_review_sample(
             size=spec["size"], seed=spec.get("seed", 0), created_by="eval-qa",
             exclude_previously_reviewed=spec.get("exclude_previously_reviewed", True),
+            **overlap_kwargs,
         )
         if redraw.run_ids != sample.run_ids:
             failures.append(
                 f"redraw with the same seed gave {redraw.run_ids}, expected {sample.run_ids}"
+            )
+        if overlap_spec and redraw.overlap.get("run_ids") != sample.overlap.get("run_ids"):
+            failures.append(
+                f"redraw assigned the overlap to {redraw.overlap.get('run_ids')}, "
+                f"expected {sample.overlap.get('run_ids')}"
             )
 
     snapshot = None
@@ -603,6 +643,42 @@ def check_review_case(service: TriageService, case: dict) -> list[str]:
             failures.append(
                 f"report note {report['note']!r} does not name {report_spec['note_contains']!r}"
             )
+        ir_spec = report_spec.get("inter_rater")
+        if ir_spec:
+            block = report["inter_rater"]
+            for key in ("pairs_assigned", "pairs_complete", "pairs_partial"):
+                if key in ir_spec and block[key] != ir_spec[key]:
+                    failures.append(
+                        f"inter-rater {key} = {block[key]}, expected {ir_spec[key]}"
+                    )
+            for family, wanted in ir_spec.get("families", {}).items():
+                row = block["families"][family]
+                rate, kappa = wanted
+                if row["agreement_rate"] != rate or row["kappa"] != kappa:
+                    failures.append(
+                        f"inter-rater family {family} = rate {row['agreement_rate']}, "
+                        f"kappa {row['kappa']}; expected rate {rate}, kappa {kappa}"
+                    )
+            if "overall" in ir_spec:
+                rate, kappa = ir_spec["overall"]
+                row = block["overall"]
+                if row["agreement_rate"] != rate or row["kappa"] != kappa:
+                    failures.append(
+                        f"inter-rater overall = rate {row['agreement_rate']}, "
+                        f"kappa {row['kappa']}; expected rate {rate}, kappa {kappa}"
+                    )
+            if "pair_disagreement_rows" in ir_spec and len(block["disagreements"]) != ir_spec["pair_disagreement_rows"]:
+                failures.append(
+                    f"inter-rater lists {len(block['disagreements'])} paired "
+                    f"disagreement rows, expected {ir_spec['pair_disagreement_rows']}"
+                )
+            for family, needle in ir_spec.get("kappa_note_contains", {}).items():
+                if needle not in block["families"][family]["kappa_note"]:
+                    failures.append(
+                        f"inter-rater family {family} kappa note "
+                        f"{block['families'][family]['kappa_note']!r} does not "
+                        f"name {needle!r}"
+                    )
 
     for more in case.get("qa_more_samples", []):
         follow = service.create_review_sample(
