@@ -436,6 +436,71 @@ the template first-response draft — internal vs customer-facing,
 saved-under-a-name vs offered-for-one-slice — and the export
 carries them as separate blocks so an audit never confuses them.
 
+## QA review
+
+`reviews.py` is the layer that grades decisions instead of
+outcomes. Everything else called "calibration" in this repo —
+the eval pack, `livecal.py`, the drift watch — scores recorded
+probabilities against what eventually happened to the ticket.
+Whether the *answers* were right is a different question, and it
+belongs to a human reviewer; the design problem is the sample,
+because a reviewer who picks (or is handed) the interesting
+tickets grades a fiction.
+
+**The sampler** (`draw_sample`, pure) therefore carries the
+audit weight. Population: decided runs — the store's promoted
+definition, `status` in `triaged` / `rejected` — because the gate
+has ruled and the record is final. Strata are
+`(composition.queue, composition.priority_band)` — the
+composition's own `BANDS` — with proportional allocation by
+largest remainder, capped per stratum, surplus seats re-offered
+in the same remainder order. Inside a stratum, candidates are
+sorted by ticket id and shuffled with `random.Random(seed)`;
+strata are drawn in sorted key order. The draw is thus a pure
+function of (records, seed, size, exclusion flag) — the golden
+pack pins the exact run ids for a seeded world, and a redraw in
+the same case must reproduce them. Exclusions are structural,
+not editorial: a confirmed duplicate never draws (read through
+`corrections.is_confirmed_duplicate`, the same predicate the
+calibration exclusion uses), and runs carrying a verdict in an
+earlier sample are excluded by default behind an explicit
+request flag. Both exclusions are named, with ids, in the
+sample record's `population` block; the sample itself is a
+stored record (`ReviewSample`: seed, strata rows, run ids,
+creator, stamp) in its own tables (migration 0004), never part
+of any run's record.
+
+**Verdicts** decompose along the port's real shape. The
+families are grounded in the `DecisionSet` structure, not
+invented for the UI: `category` grades the two choice answers,
+`priority_drivers` the four score answers, `verify` the five
+verify answers, and `routing` grades composition's outputs —
+queue and band — as their own family, because agreement with
+every answer does not imply agreement with the destination.
+Validation is strict (every family present, values in
+{agree, disagree}) and verdicts are append-only with one
+verdict per (sample, run, reviewer): a repeat is a 409 conflict
+naming the standing verdict, in the corrections idiom — grades
+are testimony, and a second reviewer remains free to disagree.
+
+**The report** (`agreement_report`, pure) aggregates over a
+sample set: per-family tallies, an overall tally, a per-backend
+split keyed off each verdicted run's `telemetry.backend` (the
+judgement graded is the backend's answers, so the split follows
+the producer), and a disagreement list sorted for audit reading.
+Rates pass through one withholding rule — `None` below five
+verdicts, counts always present — the same small-sample honesty
+as the workbench floor and the drift minimum, sized for a review
+round. The report is a read model in the strong sense: nothing
+in the repo consumes it — no weight, threshold, or prompt reads
+an agreement rate — and the golden pack pins the property that
+matters: run records, `live_samples` output, and the
+`live_calibration` payload are byte-identical before and after
+verdicts are recorded. Storage follows the run-errors precedent
+(base-class process-local default, Postgres override), so the
+InMemory doubles stay honest and the migration carries the
+production tables.
+
 ## Events, comparisons, and SLA clocks
 
 **The event bus** (`events.py: EventBus`, owned by the service) is

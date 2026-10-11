@@ -108,7 +108,7 @@ Or natively, offline, in about a minute:
 uv sync --extra dev        # or, without uv: make install-pip
 make demo                  # one ticket, traced end to end
 make test                  # 241 tests
-make evals                 # golden routing 55/55 · calibration gates pass
+make evals                 # golden routing 58/58 · calibration gates pass
 make serve                 # API + console on :8000
 ```
 
@@ -154,24 +154,29 @@ exists for tests and offline demos only. A deployment always sets
 
 Two packs, both deterministic offline:
 
-- **Golden routing set** (`evals/run_evals.py`) — 55 synthetic tickets
+- **Golden routing set** (`evals/run_evals.py`) — 58 synthetic tickets
   with authored category, queue, priority band, and safety flags —
   including the reopen cases (a reopened how_to that must not get a
   template draft, a floor-raised band, a chain that hits the reopen
   limit), a thread near-miss that must stay separate, the
   operator-correction cases (a computed thread pair an operator
   splits, a confirmed duplicate entering the calibration accounting,
-  and the correction refusals), and the workbench cases (resolution
+  and the correction refusals), the workbench cases (resolution
   knowledge over seeded neighbours, the small-sample withholding,
-  playbook actions and refusals, the note draft).
-  Gate: ≥ 95%. Current: **55/55**.
+  playbook actions and refusals, the note draft), and the QA-review
+  cases (the sampler's exact draw on a seeded world, the agreement
+  report's math with the withheld rate, and the records pinned
+  byte-identical across grading).
+  Gate: ≥ 95%. Current: **58/58**.
 - **Calibration pack** (`evals/run_calibration.py`) — the headline
   eval for a decision system: reliability bins and Brier scores per
   question against the golden truths. Verify Briers ≤ 0.013, category
   Brier 0.092, score high-event Briers ≤ 0.017, expected-score MAE
   ≤ 1.02, worst reliability-bin gap 0.243. Per-kind gates (the kinds
   have different units; the runner's docstring explains). Reopen
-  cases sample their final reopened run. With
+  cases sample their final reopened run; QA-review cases carry no
+  authored truth block — their runs are graded by verdicts — so
+  they contribute no calibration samples. With
   `EVAL_LIVE=1` the configured live backend answers instead and the
   metrics are reported, never gated.
 
@@ -443,6 +448,54 @@ exactly that (cases G52–G55: the knowledge math and exclusion, the
 small-sample withholding, the playbook actions and their refusals,
 the note draft carrying the routing reason verbatim).
 
+## QA review: grading the triage itself
+
+Calibration measures outcomes — did the ticket resolve, were the
+recorded probabilities honest about it. It never measures whether
+the *decisions* were right. That is a human reviewer's job, and
+ad-hoc reviewing cherry-picks: hand someone the interesting tickets
+and they will grade a fiction. So the sample is drawn by code
+(`reviews.py`, `POST /api/reviews/samples`; the console's **QA
+review** view runs the whole round):
+
+- **The population is decided runs** — the store's own word
+  (`triaged` / `rejected`): the gate ruled, the record is final.
+  Awaiting runs are drafts and never draw.
+- **Stratified by queue and priority band** — the composition's own
+  bands — allocated proportionally, so every destination and every
+  priority level is covered in proportion, not just the loud queues.
+- **Seeded and reproducible.** Same store, same seed, same size →
+  the same sample, pinned by test. The sample is a stored record —
+  seed, per-stratum eligible/sampled counts, run ids — so a review
+  round can be audited and re-run exactly.
+- **Exclusions, named in the record.** A confirmed duplicate never
+  samples (the calibration discipline). Runs already reviewed in an
+  earlier sample sit out by default — a reviewer should not
+  unknowingly re-grade old work — and the request can switch that
+  off; either way the sample names who was excluded.
+
+A reviewer grades each sampled run **per question family** — the
+decision port's own shape: `category` (the choice answers),
+`priority_drivers` (the score answers), `routing` (the composed
+queue and band — agree with every answer and you can still dispute
+the destination), `verify` (the five safety answers) — plus an
+overall verdict and a note. Verdicts are append-only records tied to
+the sample; one verdict per reviewer per run (a repeat is a
+conflict, not an edit), and **the run's triage record is never
+edited by being graded** — the suite pins it byte-identical.
+
+The **agreement report** (`GET /api/reviews/report`, over one sample
+or all of them) is computed in code: per-family agreement rates, a
+per-backend split (the backend rides on each run's telemetry),
+overall agreement, and the disagreement list — run, family,
+reviewer, note. Rates are withheld below five verdicts, counts
+always shown: three agreeing verdicts are an anecdote, not a rate.
+And the report is a read model — it changes no weights, no
+thresholds, no prompts. What a disagreement means is a conversation
+for the humans; the machinery's job is to make sure the
+conversation is about a fair sample. Reviewed runs carry their
+verdicts in the audit export's QA review block.
+
 ## Batch, compare, similar tickets, SLA clocks, events, webhooks
 
 The operations surface around the pipeline:
@@ -544,6 +597,7 @@ src/support_triage/
   corrections.py  operator overlay: thread corrections + confirmed duplicates
   playbooks.py    authored category playbooks + the check-off overlay reads
   workbench.py    resolution knowledge, the working-note composer, refusals
+  reviews.py      QA review: the seeded sampler, verdicts, agreement report
   compare.py      one ticket under several backends, diffed, unqueued
   sla.py          the deterministic SLA clock (band targets vs age)
   events.py       run events + the lifecycle bus behind /api/events
@@ -555,7 +609,7 @@ src/support_triage/
   checkpoints.py  LangGraph saver selection (Postgres / memory)
   api.py          FastAPI transport; demo.py / cli.py the other surfaces
 evals/            golden.jsonl + the two runners
-migrations/       0001 records · 0002 pgvector embeddings · 0003 outcomes + run errors
+migrations/       0001 records · 0002 pgvector embeddings · 0003 outcomes + run errors · 0004 review samples + verdicts
 tests/            the hermetic suite (pytest)
 ```
 
