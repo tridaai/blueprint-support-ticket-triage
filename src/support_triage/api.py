@@ -25,6 +25,11 @@ every route delegates, none re-implements. Notable behaviour:
   /api/runs/{id}/similar`` finds past tickets like this one (with
   their outcomes), and ``GET /api/events`` streams run lifecycle
   events (SSE) from the service's in-process bus;
+- the round-4 watch + suggestion layer: ``GET /api/stats/drift``
+  compares the recent live window's per-question Brier against the
+  eval baseline (drift flags only past a sample floor), and ``GET
+  /api/runs/{id}/assignment`` suggests an assignee from the roster
+  with its reasons printed — advisory only, it assigns nothing;
 - ``/readiness`` fails (503) when PostgreSQL is configured but
   unreachable, and says honestly when the in-memory test doubles are
   in use (records lost on restart — fine for a look, not for work).
@@ -464,6 +469,25 @@ def stats_calibration():
     }
 
 
+@app.get("/api/stats/drift")
+def stats_drift():
+    """Calibration drift watch: the recent window vs the eval baseline.
+
+    Per question, the Brier over the last DRIFT_WINDOW labelled
+    outcomes next to the all-time live Brier and the eval pack's
+    baseline Brier; a question flags only with enough window samples
+    and a degradation past the threshold in force (both reported in
+    the payload's ``window`` block). Without an eval run there is no
+    baseline, and the payload says so instead of flagging.
+    """
+    try:
+        eval_payload = _results_payload("calibration_results.json", "calibration")
+        eval_per_question = eval_payload.get("per_question")
+    except HTTPException:
+        eval_per_question = None
+    return get_service().stats_drift(eval_per_question)
+
+
 @app.get("/api/policy")
 def policy():
     from .composition import policy_snapshot
@@ -589,5 +613,21 @@ def similar_tickets(ticket_id: str, limit: int = 5):
         raise HTTPException(status_code=422, detail="limit must be between 1 and 20")
     try:
         return get_service().similar_tickets(ticket_id, limit=limit)
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"unknown ticket {ticket_id!r}")
+
+
+@app.get("/api/runs/{ticket_id}/assignment")
+def assignment_suggestion(ticket_id: str):
+    """A suggested assignee for a ticket at the gate — advisory only.
+
+    Ranks the roster agents covering the ticket's queue by track
+    record in the ticket's category (recorded outcomes), current
+    open load, and skill overlap, with the reasons printed. This
+    endpoint reads; it has never assigned anything. Assigning is
+    the human's ``POST /tickets/{id}/assign``.
+    """
+    try:
+        return get_service().assignment_suggestion(ticket_id)
     except KeyError:
         raise HTTPException(status_code=404, detail=f"unknown ticket {ticket_id!r}")

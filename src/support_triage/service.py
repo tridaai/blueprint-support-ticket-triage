@@ -442,6 +442,26 @@ class TriageService:
 
         return live_calibration(self.store.all_records())
 
+    def stats_drift(self, eval_per_question: dict | None) -> dict:
+        from .drift import drift_report
+
+        return drift_report(self.store.all_records(), eval_per_question)
+
+    def assignment_suggestion(self, ticket_id: str) -> dict:
+        """Who should probably take this ticket (assignment.py).
+
+        A read end to end: the roster is loaded, the records are
+        scored, a suggestion comes back. Assigning remains the
+        human's POST, exactly as before.
+        """
+        from .assignment import suggest_assignment
+        from .roster import load_roster
+
+        record = self.store.get(ticket_id)
+        if record is None:
+            raise KeyError(f"unknown ticket {ticket_id!r}")
+        return suggest_assignment(record, self.store.all_records(), load_roster())
+
     # -- reads --------------------------------------------------------------
 
     def get_record(self, ticket_id: str) -> TicketResult | None:
