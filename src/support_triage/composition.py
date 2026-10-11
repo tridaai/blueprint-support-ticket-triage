@@ -214,7 +214,7 @@ def recommend_autonomy(
         blockers.append(f"category confidence {confidence:.2f} < {AUTO_MIN_CATEGORY_CONFIDENCE}")
     for key, raised in composition.flags.items():
         if raised:
-            blockers.append(f"safety flag raised: {key}")
+            blockers.append(f"flag raised: {key}")
     if not guardrails_passed:
         blockers.append("guardrails did not pass")
     if requires_human_review:

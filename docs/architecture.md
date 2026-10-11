@@ -1,0 +1,159 @@
+# Architecture — Support Ticket Triage Agent
+
+## Provenance and stance
+
+This blueprint is Trida AI's original work: the design, the code, the
+question set, the rubrics, and every ticket in the repository were
+written for this blueprint. The *concept* it explores — models that
+return typed, calibrated decisions instead of text — is credited where
+it is due: System 1 / System 2 is Kahneman's framing, and TypeSafe
+AI's Jev is the product that made "decision models" a concrete API
+shape worth designing against. Patterns were learned from public
+sources; no code, prose, or data was copied from any of them. The
+tickets are synthetic, including the card number (a public test
+number) in the PII sample.
+
+## Decisions, not drafts
+
+The four sibling blueprints in this family end at a human gate over a
+*draft* — a letter, a packet, a review. This one ends at a gate over a
+*record of decisions*, and the difference is the design:
+
+- A generative model is good at language and unreliable at
+  commitment. Asked "how urgent is this, 0–10?" in prose, it answers
+  with a number-shaped vibe. Asked for a **probability distribution
+  over the rubric**, its answer becomes measurable: the calibration
+  pack can score whether 0.8 means 0.8.
+- Decisions decompose. "Triage this ticket" is one vague judgement;
+  eleven small questions (category? area? urgency? does it contain
+  PII?) are each checkable, each calibratable, and each reusable —
+  the same Verify answer that routes a legal ticket also blocks its
+  autonomy recommendation.
+- Consequences stay in code. Priority arithmetic, the routing
+  matrix, the overrides, and the guardrails are deterministic
+  functions of the distributions. Two runs of the same ticket get the
+  same priority; an auditor can recompute any record by hand from
+  the distributions printed on it.
+
+The model is therefore used the way System One works in Kahneman's
+account: fast pattern judgements, in parallel, at low cost — while
+the slow, accountable system (code, then a human) owns everything
+that follows from them.
+
+## The pipeline
+
+```
+intake → screen → duplicate → decide → compose → agent gate ⏸ → record decision
+```
+
+- **intake** normalises the ticket. Nothing is inferred yet.
+- **screen** treats the ticket as untrusted text (it is
+  customer-authored): injection pattern families run over subject and
+  body; flagged sentences are removed from model state and the rest
+  is fenced. Screening removes the instruction, never the ticket —
+  a customer *asking* for a refund is a billing ticket; a customer
+  *ordering the system* to refund them is flagged and still triaged.
+- **duplicate** embeds the ticket (hashing stand-in offline; any
+  OpenAI-compatible embeddings endpoint in production) and compares
+  cosine similarity against recent tickets in pgvector. The threshold
+  comparison is code; a link is recorded on the record, and the
+  original ticket's agent can be handed the thread.
+- **decide** is the single decision call: the full question set
+  against the screened state. One call, eleven answers — the cost
+  shape is the point of the port (a System One call is priced and
+  timed like a classifier, not like eleven chat turns).
+- **compose** reads the distributions deterministically:
+  `priority = 100 × (0.30·urgency + 0.25·sla_risk + 0.20·churn +
+  0.15·anger + 0.10·abuse_p)` over normalised scores, +15 when
+  P(outage) ≥ 0.5, capped at 100; routing by matrix with override
+  precedence legal → outage → engineering; autonomy recommendation;
+  the template draft decision.
+- **agent gate** (LangGraph `interrupt`) persists the record as
+  `awaiting_agent`. Approve/reject/assign arrive via API or CLI and
+  are recorded with the agent's name and note.
+
+### Guardrails (code, not prompts)
+
+Four checks run over every decision set, and all four are on the
+record: **completeness** (every question answered exactly once),
+**distribution sanity** (sums and ranges), **low confidence** (the
+honesty rule: an indecisive gating answer — flat category, or a
+safety Verify inside the undecided band — forces HUMAN_REVIEW rather
+than letting composition guess), and **safety flags** (raised PII /
+abuse / legal / outage verifies are named, and block autonomy and
+drafts unconditionally). The port validation in `decisions.py` is the
+first two checks' enforcement; the guardrail layer records them as
+verdicts alongside the checks only it can make.
+
+### The template draft, and why it is rare
+
+Exactly one slice earns a draft: category how_to at confidence
+≥ 0.80, zero safety flags, guardrails green, not a duplicate. The
+draft is a fixed template parameterised by the product area's guide —
+code writing text, not a model writing text. It exists to mark the
+boundary a deployment would automate first *if* it chose to, under
+the autonomy recommendation. This system never sends it; an agent
+does, or doesn't.
+
+## The backends, honestly
+
+- **Jev (TypeSafe)** is the design's native engine and the one this
+  blueprint cannot yet run live: early access. The adapter implements
+  the documented primitives contract and its failure behaviour is part
+  of the contract — missing key, refused call, and malformed answer
+  are all loud `ProviderError`s. A triage record that silently came
+  from a different engine than it claims would be a false record, so
+  there is no fallback path.
+- **The LLM adapter** exists so the port is exercisable today: one
+  structured-output call, temperature 0, strict schema demanded,
+  code-side validation, one bounded retry with the failure named.
+  Its probabilities are *elicited*, not trained — the calibration
+  pack in live mode (`EVAL_LIVE=1`) measures exactly how much that
+  matters per question, reported rather than gated.
+- **The offline rules** are a sparring partner with a labelled
+  jersey. Their role is to make the whole machine — composition,
+  guardrails, evals, console — testable with zero keys, and to give
+  the calibration pack a deterministic baseline. The pack caught
+  real defects in them during development (flat choice distributions,
+  a score shape whose truncated mean drifted, fence boilerplate
+  tripping the keyword rules), which is what a baseline is for.
+
+## Production topology
+
+```
+            ┌────────────────────────────┐
+ tickets →  │  API (stateless, FastAPI)  │ → S3 bucket: raw payloads
+            │  LangGraph pipeline        │
+            └────────────┬───────────────┘
+                         │
+              PostgreSQL (one database):
+              records · checkpoints · pgvector
+```
+
+- The app container holds no state: records, graph checkpoints, and
+  embeddings live in PostgreSQL; raw ticket payloads in the S3
+  bucket. Migrations are numbered SQL files applied at startup.
+- `/readiness` distinguishes "PostgreSQL unreachable" (503) from
+  "running on test doubles" (200, stated plainly). A deployment that
+  loses its database fails readiness instead of quietly going
+  in-memory — the doubles exist for tests and demos, and the code
+  paths that select them say so.
+- Telemetry is per-run and on the record: backend + model, decision
+  latency, question count, token usage and estimated cost where the
+  backend reports them, guardrail outcomes. `/metrics` aggregates
+  across records for the queue-level view.
+
+## What the agent will never do
+
+- **Send anything to a customer.** No node in the graph has that
+  capability; the template draft is text on a screen for an agent.
+- **Act on its autonomy recommendation.** It is computed, recorded,
+  and displayed — and the graph has no edge that consumes it.
+- **Guess through indecision.** A gating answer inside the undecided
+  band forces human review; the pipeline would rather stop than be
+  confidently wrong on a safety question.
+- **Degrade silently.** A failed decision call fails the run with a
+  translated, actionable error. There is no partial record and no
+  substitute backend.
+- **Treat ticket text as instructions.** Screened, fenced, and —
+  where flagged — removed, before any engine sees it.
