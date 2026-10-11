@@ -293,7 +293,7 @@
 <main id="view-qa" style="display:none; grid-template-columns:1fr">
   <section>
     <h2>QA review — grade the triage, not the outcome</h2>
-    <p class="note">Calibration (Dashboards) scores the recorded probabilities against outcomes. This view grades the <strong>decisions</strong>: a seeded, stratified sample of decided runs — queue × priority band, in proportion — that a reviewer grades per family (category, priority drivers, routing, verify) plus overall. Confirmed duplicates never draw; runs already reviewed sit out unless you switch the exclusion off. Verdicts live on the review record: grading never edits a run, and the agreement report below tunes nothing — it is a read model for a human conversation.</p>
+    <p class="note">Calibration (Dashboards) scores the recorded probabilities against outcomes. This view grades the <strong>decisions</strong>: a seeded, stratified sample of decided runs — queue × priority band, in proportion — that a reviewer grades per family (category, priority drivers, routing, verify) plus overall. Confirmed duplicates never draw; runs already reviewed sit out unless you switch the exclusion off. Verdicts live on the review record: grading never edits a run, and the agreement report below tunes nothing — it is a read model for a human conversation. An optional <strong>overlap set</strong> assigns part of the draw to two named reviewers for double grading, so the report can also answer the second question: do the reviewers agree with <em>each other</em>?</p>
     <div class="row">
       <label for="qa-size">Sample size</label>
       <input type="number" id="qa-size" value="10" min="1" style="width:90px">
@@ -304,6 +304,15 @@
       <label style="margin:0"><input type="checkbox" id="qa-exclude" checked style="width:auto"> exclude previously reviewed</label>
       <button class="primary" id="qa-draw">Draw sample</button>
       <span class="note" id="qa-draw-status"></span>
+    </div>
+    <div class="row" style="margin-top:8px">
+      <label for="qa-ov-a">Overlap reviewer A</label>
+      <input type="text" id="qa-ov-a" placeholder="optional">
+      <label for="qa-ov-b">Overlap reviewer B</label>
+      <input type="text" id="qa-ov-b" placeholder="optional">
+      <label for="qa-ov-count">Double-grade</label>
+      <input type="number" id="qa-ov-count" min="1" style="width:90px" placeholder="runs">
+      <span class="note">Optional: name two reviewers and a run count, and that many of the drawn runs are assigned to both of them — only the pair may grade those runs, and the report measures whether the two agree with each other (Cohen's kappa per family).</span>
     </div>
     <div id="qa-sample" style="margin-top:12px" class="empty">No sample drawn yet in this view.</div>
     <div class="row" style="margin-top:10px">
@@ -1139,6 +1148,10 @@ function renderQaSample(detail) {
   const graded = new Set((detail.verdicts || []).map(v => v.ticket_id + '|' + v.reviewer));
   const gradedRuns = new Set((detail.verdicts || []).map(v => v.ticket_id));
   const strata = (s.strata || []).map(r => `<tr><td>${esc(r.queue)}</td><td>${esc(r.priority_band)}</td><td>${r.eligible}</td><td>${r.sampled}</td></tr>`).join('');
+  const ov = s.overlap || {};
+  const overlapLine = (ov.run_ids || []).length
+    ? `<p class="note" style="margin-top:6px">Overlap set: <strong>${esc(ov.reviewers[0])}</strong> and <strong>${esc(ov.reviewers[1])}</strong> double-grade ${(ov.run_ids || []).map(esc).join(', ')} — on those runs only the pair may grade; everywhere else any named reviewer may.</p>`
+    : '';
   $('qa-sample').className = '';
   $('qa-sample').innerHTML = `
     <p style="margin:0 0 6px"><strong>${esc(s.sample_id)}</strong> — drawn by ${esc(s.created_by)} at ${esc(s.created_at)} · seed ${s.seed} · requested ${s.size_requested}
@@ -1147,7 +1160,7 @@ function renderQaSample(detail) {
     <p class="note" style="margin-top:6px">Population: ${pop.decided_total} decided · eligible ${pop.eligible}
     · excluded duplicates: ${(pop.excluded_duplicates || []).map(esc).join(', ') || 'none'}
     · excluded previously reviewed: ${(pop.excluded_previously_reviewed || []).map(esc).join(', ') || 'none'}
-    · verdicted runs so far: ${detail.verdicted_runs} of ${s.run_ids.length}</p>`;
+    · verdicted runs so far: ${detail.verdicted_runs} of ${s.run_ids.length}</p>${overlapLine}`;
   const famSelect = (fam, label) => `
     <label for="qa-fam-${fam}">${label}</label>
     <select id="qa-fam-${fam}"><option value="agree">agree</option><option value="disagree">disagree</option></select>`;
@@ -1173,7 +1186,7 @@ function renderQaSample(detail) {
       <button class="primary" id="qa-verdict">Record verdict</button>
       <span class="note" id="qa-verdict-status"></span>
     </div>
-    <p class="note" style="margin-top:6px">One verdict per reviewer per run — a verdict is final; another reviewer may still grade the same run. Click a run id in the queue (console view) to re-read its decision record before grading.</p>`;
+    <p class="note" style="margin-top:6px">One verdict per reviewer per run — a verdict is final; another reviewer may still grade the same run.${(s.overlap && (s.overlap.run_ids || []).length) ? ` On overlap runs (${(s.overlap.run_ids || []).map(esc).join(', ')}) only the assigned pair — ${esc(s.overlap.reviewers[0])} and ${esc(s.overlap.reviewers[1])} — may grade; anyone else is refused by name.` : ''} Click a run id in the queue (console view) to re-read its decision record before grading.</p>`;
   $('qa-verdict').onclick = submitQaVerdict;
 }
 
@@ -1230,6 +1243,12 @@ async function loadQaSamples(selectId) {
 async function drawQaSample() {
   const by = $('qa-by').value.trim();
   if (!by) { $('qa-draw-status').textContent = 'a sample names who drew it'; return; }
+  const ovA = $('qa-ov-a').value.trim(), ovB = $('qa-ov-b').value.trim();
+  const ovCount = parseInt($('qa-ov-count').value, 10);
+  if ((ovA || ovB || ovCount) && !(ovA && ovB && ovCount)) {
+    $('qa-draw-status').textContent = 'an overlap names both reviewers and the double-grade count — or none of them';
+    return;
+  }
   $('qa-draw-status').textContent = 'drawing…';
   try {
     const res = await fetch('/api/reviews/samples', {
@@ -1239,6 +1258,7 @@ async function drawQaSample() {
         seed: parseInt($('qa-seed').value, 10) || 0,
         created_by: by,
         exclude_previously_reviewed: $('qa-exclude').checked,
+        ...(ovA ? {overlap_reviewers: [ovA, ovB], overlap_count: ovCount} : {}),
       }),
     });
     if (!res.ok) {
@@ -1263,6 +1283,14 @@ async function runQaReport(all) {
     const famRows = Object.entries(r.families).map(([fam, row]) => `<tr><td>${esc(fam)}</td><td>${row.verdicts}</td><td>${row.agree}</td><td>${qaPct(row.rate)}</td></tr>`).join('');
     const backendRows = Object.entries(r.by_backend || {}).map(([b, row]) => `<tr><td>${esc(b)}</td><td>${row.verdicts}</td><td>${row.overall_agree}</td><td>${qaPct(row.overall_rate)}</td></tr>`).join('') || '<tr><td colspan="4" class="note">no verdicts yet</td></tr>';
     const disagreements = (r.disagreements || []).map(d => `<tr><td>${esc(d.ticket_id)}</td><td>${esc(d.family)}</td><td>${esc(d.reviewer)}</td><td>${esc(d.note)}</td></tr>`).join('') || '<tr><td colspan="4" class="note">no disagreements recorded</td></tr>';
+    const ir = r.inter_rater || {families: {}, overall: {}};
+    const kappaCell = row => (row.kappa === null || row.kappa === undefined)
+      ? `<span class="note">${esc(row.kappa_note || 'withheld')}</span>`
+      : row.kappa.toFixed(4);
+    const rateCell = rate => (rate === null || rate === undefined) ? '<span class="note">no pairs yet</span>' : (rate * 100).toFixed(1) + '%';
+    const irRow = (label, row) => `<tr><td>${esc(label)}</td><td>${row.pairs || 0}</td><td>${row.both_agree || 0}</td><td>${row.both_disagree || 0}</td><td>${row.split || 0}</td><td>${rateCell(row.agreement_rate)}</td><td>${kappaCell(row)}</td></tr>`;
+    const irRows = Object.entries(ir.families || {}).map(([fam, row]) => irRow(fam, row)).join('') + irRow('overall', ir.overall || {});
+    const pairDis = (ir.disagreements || []).map(d => `<tr><td>${esc(d.ticket_id)}</td><td>${esc(d.family)}</td><td>${esc(d.reviewer_a)}: ${esc(d.verdict_a)}<br><span class="note">${esc(d.note_a)}</span></td><td>${esc(d.reviewer_b)}: ${esc(d.verdict_b)}<br><span class="note">${esc(d.note_b)}</span></td></tr>`).join('') || '<tr><td colspan="4" class="note">no paired disagreements — where both graded, the pair agreed</td></tr>';
     $('qa-report').className = '';
     $('qa-report').innerHTML = `
       <p style="margin:0 0 6px"><strong>Overall agreement: ${qaPct(r.overall_rate)}</strong> — ${r.overall_agree} of ${r.verdicts} verdicts agree, over ${r.verdicted_runs} graded run(s) in ${(r.samples || []).length} sample(s). <span class="note">${esc(r.note)}</span></p>
@@ -1270,7 +1298,12 @@ async function runQaReport(all) {
       <p style="margin:12px 0 6px"><strong>By backend</strong></p>
       <table><tr><th>Backend</th><th>Verdicts</th><th>Overall agree</th><th>Rate</th></tr>${backendRows}</table>
       <p style="margin:12px 0 6px"><strong>Disagreements</strong></p>
-      <table><tr><th>Run</th><th>Family</th><th>Reviewer</th><th>Note</th></tr>${disagreements}</table>`;
+      <table><tr><th>Run</th><th>Family</th><th>Reviewer</th><th>Note</th></tr>${disagreements}</table>
+      <p style="margin:16px 0 6px"><strong>Inter-rater — do the reviewers agree with each other?</strong></p>
+      <p class="note" style="margin:0 0 6px">${esc(ir.note || '')} Kappa is Cohen's, from the two raters' own marginals; it is withheld below ${ir.min_pairs_for_kappa || 10} completed pairs and shown as its reason when it is undefined (no variance — the raw rate is then the whole story).</p>
+      <table><tr><th>Family</th><th>Pairs</th><th>Both agree</th><th>Both disagree</th><th>Split</th><th>Agreement</th><th>Kappa</th></tr>${irRows}</table>
+      <p style="margin:12px 0 6px"><strong>Paired disagreements — the calibration agenda</strong></p>
+      <table><tr><th>Run</th><th>Family</th><th>Reviewer A</th><th>Reviewer B</th></tr>${pairDis}</table>`;
     $('qa-report-status').textContent = '';
   } catch (e) { $('qa-report-status').textContent = 'report failed: ' + e.message; }
 }

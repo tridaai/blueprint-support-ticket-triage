@@ -320,6 +320,14 @@ class ReviewSample(BaseModel):
     # One row per (queue, band) stratum: eligible vs sampled counts.
     strata: list[dict] = Field(default_factory=list)
     run_ids: list[str] = Field(default_factory=list)  # the draw, in draw order
+    # The overlap set (round 10), empty when the draw requested
+    # none: {reviewers: [a, b], requested: {count|fraction},
+    # count: k, run_ids: [...]} — the runs both named reviewers
+    # double-grade, picked by the draw's own seeded stream
+    # (reviews.draw_sample), so the pairing reproduces with the
+    # sample and the report can measure reviewer-vs-reviewer
+    # agreement over exactly the runs the record assigns.
+    overlap: dict = Field(default_factory=dict)
     note: str = ""
 
 

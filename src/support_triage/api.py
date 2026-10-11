@@ -63,13 +63,18 @@ every route delegates, none re-implements. Notable behaviour:
 - the QA review layer (reviews.py): ``POST /api/reviews/samples``
   draws a seeded, stratified sample over the decided runs (queue ×
   priority band; confirmed duplicates never draw; previously
-  reviewed runs excluded unless the request says otherwise), ``GET
-  /api/reviews/samples`` / ``/{id}`` list and read samples with
-  their verdicts, ``POST /api/reviews/samples/{id}/verdicts``
+  reviewed runs excluded unless the request says otherwise; an
+  optional overlap assigns part of the draw to two named reviewers
+  for double grading, and the assignment binds on those runs),
+  ``GET /api/reviews/samples`` / ``/{id}`` list and read samples
+  with their verdicts, ``POST /api/reviews/samples/{id}/verdicts``
   records a reviewer's per-family grading (the run's record is
   never edited), and ``GET /api/reviews/report`` serves the
   agreement report — per-family rates, per-backend split, and the
-  disagreement list, with rates withheld below the verdict floor;
+  disagreement list, with rates withheld below the verdict floor,
+  plus the inter-rater block over the overlap pairs (raw agreement
+  and Cohen's kappa per family, paired disagreements side by
+  side);
 - ``/readiness`` fails (503) when PostgreSQL is configured but
   unreachable, and says honestly when the in-memory test doubles are
   in use (records lost on restart — fine for a look, not for work).
@@ -1141,6 +1146,12 @@ class ReviewSampleRequest(BaseModel):
     seed: int = 0  # the draw's seed — recorded on the sample
     created_by: str = ""  # who drew the sample
     exclude_previously_reviewed: bool = True
+    # The overlap set (round 10): two named reviewers who
+    # double-grade part of the draw, sized by exactly one of
+    # overlap_count / overlap_fraction. Empty = no overlap.
+    overlap_reviewers: list[str] = []
+    overlap_count: int | None = None
+    overlap_fraction: float | None = None
 
 
 class ReviewVerdictRequest(BaseModel):
@@ -1172,7 +1183,11 @@ def create_review_sample(body: ReviewSampleRequest, request: Request):
     an earlier sample sit out unless ``exclude_previously_reviewed``
     is false. The sample is stored (seed, strata, run ids,
     exclusions by name) so the round is auditable and re-runnable.
-    The response is the sample record.
+    With ``overlap_reviewers`` (exactly two names) plus exactly one
+    of ``overlap_count`` / ``overlap_fraction``, part of the draw
+    is assigned to that pair for double grading — the assignment
+    rides the sample record and binds on those runs. The response
+    is the sample record.
     """
     require_api_key(request)
     if not body.created_by.strip():
@@ -1185,6 +1200,9 @@ def create_review_sample(body: ReviewSampleRequest, request: Request):
             seed=body.seed,
             created_by=body.created_by.strip(),
             exclude_previously_reviewed=body.exclude_previously_reviewed,
+            overlap_reviewers=body.overlap_reviewers or None,
+            overlap_count=body.overlap_count,
+            overlap_fraction=body.overlap_fraction,
         )
     except ValueError as exc:
         _review_http(exc)
@@ -1217,7 +1235,9 @@ def record_review_verdict(sample_id: str, body: ReviewVerdictRequest, request: R
     Per-family agree / disagree (all four families), an overall
     verdict, and a note. The verdict lands on the review record;
     the run's triage record is never edited by being graded. One
-    verdict per (sample, run, reviewer) — a repeat is a 409.
+    verdict per (sample, run, reviewer) — a repeat is a 409. On a
+    run in the sample's overlap set, only the two assigned
+    reviewers may grade it — anyone else is a 409 naming the pair.
     """
     require_api_key(request)
     if not body.reviewer.strip():
@@ -1243,6 +1263,11 @@ def review_report(samples: str = ""):
     """The agreement report: per-family rates, per-backend split,
     overall agreement, and the disagreement list — over one sample
     (``?samples=QAS-0001``), a comma-separated set, or all samples.
+    The ``inter_rater`` block measures the reviewers against each
+    other over the samples' overlap pairs: raw agreement and
+    Cohen's kappa per family, kappa withheld below the pair floor
+    and null with its reason when undefined, plus the paired
+    disagreements with both verdicts and both notes.
 
     A read model: rates are withheld below the verdict floor (the
     counts always show), and nothing in the report feeds a weight,

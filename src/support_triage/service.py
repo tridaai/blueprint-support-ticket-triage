@@ -23,7 +23,10 @@ never to the graph directly. The service:
   over decided runs, stores reviewers' per-family verdicts on the
   review record (never on the run's record), and serves the
   agreement report — the layer that grades the triage itself, where
-  calibration only ever graded outcomes;
+  calibration only ever graded outcomes; an optional overlap set
+  assigns part of the draw to two named reviewers for double
+  grading (the assignment binds on those runs), so the report can
+  also measure whether the reviewers agree with each other;
 - knows the customer (dossier.py): before any run is triaged it
   composes the customer-history block from the customer's prior
   records — counts, categories, flags, the last outcome, never
@@ -1246,6 +1249,9 @@ class TriageService:
         seed: int = 0,
         created_by: str = "",
         exclude_previously_reviewed: bool = True,
+        overlap_reviewers=None,
+        overlap_fraction=None,
+        overlap_count=None,
     ) -> ReviewSample:
         """Draw a QA review sample over the decided runs (reviews.py).
 
@@ -1255,6 +1261,14 @@ class TriageService:
         The sample is stored as its own record — the draw, its
         strata, and every exclusion by name — so the round can be
         audited and re-run exactly. No run record is touched.
+
+        An optional overlap (two named reviewers plus a count or a
+        fraction) assigns part of the draw to both reviewers for
+        double grading — the assignment rides the sample record,
+        picked by the draw's own seeded stream, and binds on those
+        runs: only the named pair may grade them (record_review_
+        verdict enforces it), which is what makes the report's
+        inter-rater block an audit rather than an impression.
         """
         from . import reviews
 
@@ -1268,12 +1282,15 @@ class TriageService:
                 f"sample size must be a positive integer, got {size!r}"
             )
         records = self.store.all_records()
-        run_ids, population, strata = reviews.draw_sample(
+        run_ids, population, strata, overlap = reviews.draw_sample(
             records,
             self.store.all_review_verdicts(),
             size=size,
             seed=int(seed),
             exclude_previously_reviewed=bool(exclude_previously_reviewed),
+            overlap_reviewers=overlap_reviewers,
+            overlap_fraction=overlap_fraction,
+            overlap_count=overlap_count,
         )
         if not run_ids:
             raise reviews.ReviewError(
@@ -1294,6 +1311,12 @@ class TriageService:
         )
         if len(run_ids) < size:
             note += " — the request ran past the eligible population, so the sample is the population"
+        if overlap:
+            note += (
+                f" — overlap: {overlap['reviewers'][0]} and "
+                f"{overlap['reviewers'][1]} double-grade {overlap['count']} "
+                "of the runs"
+            )
         sample = ReviewSample(
             sample_id=sample_id,
             seed=int(seed),
@@ -1304,13 +1327,19 @@ class TriageService:
             population=population,
             strata=strata,
             run_ids=run_ids,
+            overlap=overlap,
             note=note,
         )
         self.store.save_review_sample(sample)
         self._publish(
             "review_sample_created",
             "",
-            {"sample_id": sample_id, "runs": len(run_ids), "seed": sample.seed},
+            {
+                "sample_id": sample_id,
+                "runs": len(run_ids),
+                "seed": sample.seed,
+                "overlap_runs": len(overlap.get("run_ids", [])),
+            },
         )
         return sample
 
@@ -1354,6 +1383,12 @@ class TriageService:
         grading changes nothing about what was decided (the suite
         pins the record, the calibration samples, and the live
         calibration payload byte-identical across a verdict).
+
+        Assignment binds only where the sample created one: on the
+        overlap set's runs, a reviewer outside the named pair is
+        refused as a conflict — the pair is the pair. Every other
+        run keeps the open discipline: any named reviewer may grade
+        it, once.
         """
         from . import reviews
 
@@ -1367,6 +1402,15 @@ class TriageService:
             raise reviews.ReviewError(
                 f"run {ticket_id!r} is not in sample {sample_id} — a verdict "
                 "grades a run the sample drew, never one it did not"
+            )
+        overlap = sample.overlap or {}
+        assigned = overlap.get("reviewers") or []
+        if ticket_id in (overlap.get("run_ids") or []) and reviewer not in assigned:
+            raise reviews.ReviewConflict(
+                f"run {ticket_id} is in sample {sample_id}'s overlap set, "
+                f"assigned to {assigned[0]} and {assigned[1]} — {reviewer} "
+                "is not assigned to it; the paired grades are part of the "
+                "audit, so the pair is the pair"
             )
         cleaned = reviews.validate_verdict_families(families)
         overall_clean = reviews.validate_overall(overall)
