@@ -38,7 +38,14 @@ still answer every question about the run:
 - the customer history the run was triaged with (dossier.py): the
   prior counts, the flags with their evidence, the last outcome,
   and what the backend did with the history block — the context
-  the call was offered, auditable like every other input.
+  the call was offered, auditable like every other input;
+- the track record of the template draft this run carried
+  (template_effectiveness.py), when the service computed the
+  report: its outcome-bearing uses, resolution / reopen /
+  escalation rates against the category baseline, and the
+  needs-review flag — the population evidence about this run's
+  draft, handed in like the review verdicts, never a verdict on
+  this run itself.
 
 Everything here is composed in code from the stored record. No
 model is consulted and no prose is generated: the text rendering is
@@ -88,6 +95,7 @@ def build_export(
     sla: dict | None = None,
     drift: dict | None = None,
     review: dict | None = None,
+    template_stats: dict | None = None,
 ) -> dict:
     """Assemble the audit document for one stored run (pure)."""
     composition = record.composition
@@ -309,6 +317,13 @@ def build_export(
         # drift context above; ``None`` means never reviewed.
         "qa_review": review,
         "draft": record.draft.model_dump() if record.draft is not None else None,
+        # Template effectiveness (template_effectiveness.py): the
+        # track record of the template THIS run carried, computed
+        # over every outcome-bearing run and handed in by the
+        # service like the review block above — the export is where
+        # a reader of one run meets the population evidence about
+        # its draft. ``None`` when the caller computed no report.
+        "template_effectiveness": template_stats,
         "telemetry": record.telemetry.model_dump() if record.telemetry is not None else None,
         "trace": [step.model_dump() for step in record.trace],
         "note": (
@@ -668,6 +683,37 @@ def render_text(document: dict) -> str:
         lines.append("")
         lines.append("TEMPLATE DRAFT (for the agent — never sent by the system)")
         lines.append(document["draft"]["text"])
+
+    template_stats = document.get("template_effectiveness")
+    if template_stats:
+        lines.append("")
+        lines.append(
+            "TEMPLATE EFFECTIVENESS (the draft's track record — "
+            "template_effectiveness.py)"
+        )
+        if template_stats["state"] == "measured":
+            stats = template_stats
+
+            def rate(value) -> str:
+                return "withheld (too few uses)" if value is None else _fmt(value)
+
+            lines.append(
+                f"Template {stats['template']} (category {stats['category']}): "
+                f"{stats['uses']} outcome-bearing use(s) — resolved "
+                f"{stats['resolved']} (rate {rate(stats['resolution_rate'])}), "
+                f"reopened {stats['reopened']} (rate {rate(stats['reopen_rate'])}; "
+                f"category baseline {rate(stats['baseline_reopen_rate'])}), "
+                f"escalated {stats['escalated']} "
+                f"(rate {rate(stats['escalation_rate'])})"
+            )
+            if stats["flag"]:
+                lines.append(f"Flag: {stats['flag']} — {stats['flag_detail']}")
+            lines.append(
+                "The flag advises the template's owners; it changes "
+                "nothing about any run, this one included."
+            )
+        else:
+            lines.append(template_stats["note"])
 
     lines.append("")
     lines.append("TRACE")

@@ -217,6 +217,10 @@
       <div id="d-performance"></div>
     </section>
     <section>
+      <h2>Template effectiveness — do the drafts earn their place?</h2>
+      <div id="d-templates"><p class="empty">Loading…</p></div>
+    </section>
+    <section>
       <h2>Calibration — eval pack vs live outcomes</h2>
       <div id="d-calibration"></div>
       <h2 style="margin-top:18px">Drift watch — recent window vs eval baseline</h2>
@@ -1397,11 +1401,12 @@ function tile(num, lab) { return `<div class="tile"><div class="num">${esc(num)}
 
 async function loadDashboards() {
   dashboardsLoaded = true;
-  const [ov, perf, cal, drift] = await Promise.all([
+  const [ov, perf, cal, drift, tpl] = await Promise.all([
     fetch('/api/stats/overview', {headers: headers()}).then(r => r.json()),
     fetch('/api/stats/performance', {headers: headers()}).then(r => r.json()),
     fetch('/api/stats/calibration', {headers: headers()}).then(r => r.json()),
     fetch('/api/stats/drift', {headers: headers()}).then(r => r.json()).catch(() => null),
+    fetch('/api/stats/templates', {headers: headers()}).then(r => r.json()).catch(() => null),
   ]);
   if (!POLICY) await loadPolicy(); else renderPolicy();
 
@@ -1436,6 +1441,26 @@ async function loadDashboards() {
 
   renderCalibration(cal);
   renderDrift(drift);
+  renderTemplates(tpl);
+}
+
+function renderTemplates(tpl) {
+  const box = $('d-templates');
+  if (!tpl) { box.innerHTML = '<p class="empty">Template effectiveness unavailable.</p>'; return; }
+  const pct = v => v === null || v === undefined ? '<span class="note">withheld</span>' : (v * 100).toFixed(1) + '%';
+  const rows = (tpl.templates || []).map(t =>
+    `<tr><td><strong>${esc(t.template)}</strong><br><span class="note">${esc(t.category)}</span></td>` +
+    `<td>${t.uses}</td><td>${t.resolved} · ${pct(t.resolution_rate)}</td>` +
+    `<td>${t.reopened} · ${pct(t.reopen_rate)}<br><span class="note">baseline ${pct(t.baseline_reopen_rate)}</span></td>` +
+    `<td>${t.escalated} · ${pct(t.escalation_rate)}</td>` +
+    `<td>${t.flag ? pill('NEEDS REVIEW', 'bad') : '<span class="note">—</span>'}</td></tr>`).join('');
+  const totals = tpl.totals || {};
+  box.innerHTML =
+    `<p style="margin:0 0 6px">Graded over the <strong>${totals.outcome_bearing || 0}</strong> outcome-bearing run(s) — a template is judged only where a ticket's later life is known. Rates need <strong>${tpl.min_uses_for_rate}</strong> uses; a reopen rate beating its category baseline by more than <strong>${Number(tpl.reopen_review_margin).toFixed(2)}</strong> flags the template for its owners — the flag changes nothing automatically.</p>` +
+    (rows
+      ? `<table><tr><th>Template</th><th>Uses</th><th>Resolved</th><th>Reopened</th><th>Escalated</th><th>Flag</th></tr>${rows}</table>`
+      : '<p class="empty">No template has outcome-bearing uses yet.</p>') +
+    `<p class="note" style="margin-top:6px">${esc(tpl.note || '')} Totals: ${totals.with_template || 0} with a named template · ${totals.unknown_template || 0} with an unnamed draft (pre-link records — counted, never attributed) · ${totals.no_template || 0} with no draft · ${totals.excluded_confirmed_duplicates || 0} confirmed duplicate(s) excluded from the rates.</p>`;
 }
 
 function renderDrift(drift) {

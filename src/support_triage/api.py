@@ -30,6 +30,11 @@ every route delegates, none re-implements. Notable behaviour:
   eval baseline (drift flags only past a sample floor), and ``GET
   /api/runs/{id}/assignment`` suggests an assignee from the roster
   with its reasons printed — advisory only, it assigns nothing;
+- the template-effectiveness layer: ``GET /api/stats/templates``
+  grades the template drafts against the outcomes of the tickets
+  that carried them (resolution / reopen / escalation rates per
+  template against the category baseline, rates withheld below
+  the use floor, a needs-review flag that changes nothing);
 - the round-5 policy + audit layer: ``POST /api/policy/replay``
   replays a hypothetical policy (threshold, weights, outage boost)
   over every stored run's recorded answers — no backend call,
@@ -531,6 +536,19 @@ def stats_drift():
     except HTTPException:
         eval_per_question = None
     return get_service().stats_drift(eval_per_question)
+
+
+@app.get("/api/stats/templates")
+def stats_templates():
+    """Template effectiveness: do the drafts earn their place?
+
+    Per template, over the outcome-bearing runs that carried it:
+    uses, resolution / reopen / escalation rates (withheld below
+    the use floor, counts always shown), the category baselines,
+    and the needs-review flag for the templates' owners — a flag
+    that changes nothing automatically. Read-only, like every
+    stats endpoint."""
+    return get_service().template_effectiveness()
 
 
 @app.get("/api/policy")
