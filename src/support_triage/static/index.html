@@ -215,6 +215,8 @@
     <section>
       <h2>Calibration — eval pack vs live outcomes</h2>
       <div id="d-calibration"></div>
+      <h2 style="margin-top:18px">Drift watch — recent window vs eval baseline</h2>
+      <div id="d-drift"><p class="empty">Loading drift…</p></div>
     </section>
     <section style="grid-column: 1 / -1">
       <h2>Policy — what the runs were composed under</h2>
@@ -415,9 +417,12 @@ function renderResult(r) {
     ${r.draft ? `<h2 style="margin-top:18px">Template draft (for the agent — never sent by the system)</h2><pre>${esc(r.draft.text)}</pre>` : ''}
     <h2 style="margin-top:18px">Similar past tickets</h2>
     <div id="similar-box" class="empty">Loading…</div>
+    <h2 style="margin-top:18px">Assignment suggestion <span class="note">(advisory — a human assigns)</span></h2>
+    <div id="assignment-box" class="empty">Loading…</div>
     <h2 style="margin-top:18px">Trace</h2>
     <ul>${trace}</ul>`;
   loadSimilar(r.ticket_id);
+  loadAssignment(r.ticket_id);
   const waiting = r.status === 'awaiting_agent';
   $('gate-section').style.display = waiting ? '' : 'none';
   $('gate-status').textContent = waiting ? '' : `already decided (${r.status})`;
@@ -438,6 +443,40 @@ async function openTicket(id) {
   const res = await fetch(`/tickets/${encodeURIComponent(id)}`, {headers: headers()});
   if (!res.ok) { $('run-status').textContent = `could not load ${id}`; return; }
   renderResult(await res.json());
+}
+
+function candidateRow(c, label) {
+  return `<tr><td>${esc(label)}</td><td><strong>${esc(c.agent_name)}</strong> <span class="note">(${esc(c.agent_id)})</span></td><td>${Number(c.score).toFixed(3)}</td><td>${c.reasons.map(esc).join('<br>')}</td></tr>`;
+}
+
+async function loadAssignment(id) {
+  const box = $('assignment-box');
+  if (!box) return;
+  try {
+    const res = await fetch(`/api/runs/${encodeURIComponent(id)}/assignment`, {headers: headers()});
+    if (!res.ok) throw new Error('unavailable');
+    const data = await res.json();
+    if (!data.suggestion) {
+      box.className = 'empty';
+      box.textContent = data.note || 'No suggestion for this ticket.';
+      return;
+    }
+    const rows = [candidateRow(data.suggestion, 'Suggested')]
+      .concat((data.runners_up || []).map(c => candidateRow(c, 'Runner-up'))).join('');
+    box.className = '';
+    box.innerHTML = `<table><tr><th></th><th>Agent</th><th>Score</th><th>Why</th></tr>${rows}</table>
+      <div class="row" style="margin-top:8px">
+        <button id="use-suggestion">Use suggestion in the gate form</button>
+        <span class="note">${esc(data.note)} — scored over ${data.candidates} roster agent(s) covering ${esc(data.queue)}: track record × ${data.weights.track_record}, open load × ${data.weights.open_load}, skills × ${data.weights.skills}. Filling the form assigns nothing until you click Assign or Approve.</span>
+      </div>`;
+    $('use-suggestion').onclick = () => {
+      $('assignee').value = data.suggestion.agent_id;
+      $('gate-section').scrollIntoView({behavior: 'smooth', block: 'center'});
+    };
+  } catch (e) {
+    box.className = 'empty';
+    box.textContent = 'Assignment suggestion unavailable.';
+  }
 }
 
 async function loadSimilar(id) {
@@ -675,10 +714,11 @@ function tile(num, lab) { return `<div class="tile"><div class="num">${esc(num)}
 
 async function loadDashboards() {
   dashboardsLoaded = true;
-  const [ov, perf, cal] = await Promise.all([
+  const [ov, perf, cal, drift] = await Promise.all([
     fetch('/api/stats/overview', {headers: headers()}).then(r => r.json()),
     fetch('/api/stats/performance', {headers: headers()}).then(r => r.json()),
     fetch('/api/stats/calibration', {headers: headers()}).then(r => r.json()),
+    fetch('/api/stats/drift', {headers: headers()}).then(r => r.json()).catch(() => null),
   ]);
   if (!POLICY) await loadPolicy(); else renderPolicy();
 
@@ -712,6 +752,29 @@ async function loadDashboards() {
     : '<p class="empty">No runs yet.</p>';
 
   renderCalibration(cal);
+  renderDrift(drift);
+}
+
+function renderDrift(drift) {
+  const box = $('d-drift');
+  if (!drift) { box.innerHTML = '<p class="empty">Drift watch unavailable.</p>'; return; }
+  if (!drift.available) {
+    box.innerHTML = `<p class="empty">${esc(drift.note)}</p>`;
+    return;
+  }
+  const w = drift.window || {};
+  const fmt = v => v === null || v === undefined ? '—' : Number(v).toFixed(3);
+  const rows = Object.entries(drift.questions || {}).map(([k, q]) => {
+    const state = q.drift
+      ? pill('DRIFT', 'bad')
+      : (q.enough_samples ? '<span class="note">within threshold</span>' : `<span class="note">warming up — ${q.window_n} of ${w.min_samples} window samples</span>`);
+    return `<tr><td>${esc(k)}</td><td>${esc(q.kind || '')}</td><td>${fmt(q.eval_brier)}</td><td>${fmt(q.live_brier)} <span class="note">(n=${q.live_n})</span></td><td>${fmt(q.window_brier)} <span class="note">(n=${q.window_n})</span></td><td>${q.delta_vs_eval === null || q.delta_vs_eval === undefined ? '—' : (q.delta_vs_eval >= 0 ? '+' : '') + Number(q.delta_vs_eval).toFixed(3)}</td><td>${state}</td></tr>`;
+  }).join('');
+  box.innerHTML =
+    `<p style="margin:0 0 6px">Last <strong>${w.outcomes_in_window}</strong> of ${w.outcomes_total} labelled outcomes (window ${w.size}) · a question flags when its windowed Brier degrades <strong>≥ ${Number(w.brier_threshold).toFixed(2)}</strong> past its eval baseline with at least ${w.min_samples} window samples.</p>` +
+    (drift.any_drift ? `<p class="flag" style="margin:0 0 6px">Drift flagged — a question's recent calibration is materially worse than the baseline it shipped with.</p>` : '') +
+    (rows ? `<table><tr><th>Question</th><th>Kind</th><th>Eval Brier</th><th>Live (all-time)</th><th>Window</th><th>Δ vs eval</th><th>State</th></tr>${rows}</table>` : '<p class="empty">No questions scored yet.</p>') +
+    `<p class="note" style="margin-top:6px">${esc(drift.note)}</p>`;
 }
 
 function binsTable(bins) {
