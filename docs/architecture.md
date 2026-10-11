@@ -614,6 +614,65 @@ workbench's `hours_from_intake` and its `KNOWLEDGE_MIN_SAMPLES`
 floor: one floor for "too few to quote", wherever the repo quotes
 a rate over outcomes.
 
+## Template effectiveness
+
+`template_effectiveness.py` closes the loop the dossier opened:
+the dossier asks how a *customer's* tickets went; this asks how
+a *template's* tickets went. The template draft is the one piece
+of customer-bound text the system composes (never sends), and
+its quality was previously unmeasured — eligibility rules said
+where a draft may appear, nothing said whether appearing helped.
+
+**No new recording.** The measurement needs a link from outcome
+back to template, and the link already existed: the graph's
+compose step stores the built draft on the run, and `DraftInfo`
+carries the template's name (`how_to_first_response[<area>]`).
+The report is a pure projection over `all_records()` — no
+schema change, no migration. The one record shape it cannot
+attribute is handled by naming it: a draft with an empty
+template name (what a record written before the name was
+recorded would look like) lands in an explicit unknown bucket —
+counted in the totals and in its category's baseline, attributed
+to no template. Guessing a name for it would corrupt every rate
+the report exists to make trustworthy.
+
+**Definitions are the design.** Each rate is defined from the
+outcome vocabulary and nothing else, in the module where the
+report lives: resolved is `AgentOutcome.resolved`; reopened is
+chain membership, resolved through `ReopenInfo.root_ticket_id`
+(the same root the corrections layer uses to keep a chain
+whole), counted once per run however long the chain runs;
+escalated is `final_queue` landing in one of the two escalation
+queues composition itself can route to, *minus* the runs triage
+already routed there — an outcome that agrees with an
+escalation routing is not the agent escalating. The universe is
+outcome-bearing runs, because a run without an outcome is a
+ticket whose later life is unknown, and counting it as a use
+would grade templates partly on silence. Confirmed duplicates
+are excluded from the rates on the calibration precedent (a
+duplicate is not independent evidence) and named in the totals
+so the accounting reconciles: outcome-bearing = measured +
+excluded, and measured splits exactly into named / unknown /
+no-template.
+
+**The flag is a report, not a mechanism.** `needs_review` fires
+when a template's reopen rate exceeds its category baseline by
+more than the authored margin (0.25), both quotable (five-use
+floor, this repo's third small-sample floor — sized like the QA
+report's because a reopen rate over four tickets is the same
+kind of anecdote). Nothing consumes the flag: no suppression
+list is consulted at draft time, no composition input exists
+for it to move. That is the dossier firewall again, one level
+up — measurement that cannot feed back into the measured system
+without a human deciding it should. The golden firewall case
+(G65) is the pin: with the flag standing in the store, a probe
+ticket's composition and answers are byte-identical to a fresh
+service's, and the flagged template is still drafted, word for
+word. The audit export carries the run's own template's row
+(handed in by the service, like the QA verdicts) so the reader
+of one run meets the population evidence without the export
+becoming a second report implementation.
+
 ## Events, comparisons, and SLA clocks
 
 **The event bus** (`events.py: EventBus`, owned by the service) is

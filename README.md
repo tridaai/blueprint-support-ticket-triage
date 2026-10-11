@@ -107,8 +107,8 @@ Or natively, offline, in about a minute:
 ```bash
 uv sync --extra dev        # or, without uv: make install-pip
 make demo                  # one ticket, traced end to end
-make test                  # 241 tests
-make evals                 # golden routing 63/63 · calibration gates pass
+make test                  # 318 tests
+make evals                 # golden routing 65/65 · calibration gates pass
 make serve                 # API + console on :8000
 ```
 
@@ -154,7 +154,7 @@ exists for tests and offline demos only. A deployment always sets
 
 Two packs, both deterministic offline:
 
-- **Golden routing set** (`evals/run_evals.py`) — 63 synthetic tickets
+- **Golden routing set** (`evals/run_evals.py`) — 65 synthetic tickets
   with authored category, queue, priority band, and safety flags —
   including the reopen cases (a reopened how_to that must not get a
   template draft, a floor-raised band, a chain that hits the reopen
@@ -174,8 +174,13 @@ Two packs, both deterministic offline:
   assignment, a third reviewer refused off the overlap set, and a
   twelve-run double-graded world whose per-family kappas are
   asserted to the decimal — including the family whose kappa is
-  honestly null).
-  Gate: ≥ 95%. Current: **63/63**.
+  honestly null), and the template-effectiveness cases (a staged
+  world of template-earning tickets whose rates are asserted from
+  hand-counted outcomes — one template flagged, one clean, one
+  below the use floor, a pre-link record counted but never
+  attributed — and a firewall case pinning that a flagged template
+  changes no composition and suppresses no draft).
+  Gate: ≥ 95%. Current: **65/65**.
 - **Calibration pack** (`evals/run_calibration.py`) — the headline
   eval for a decision system: reliability bins and Brier scores per
   question against the golden truths. Verify Briers ≤ 0.013, category
@@ -582,6 +587,51 @@ the customer-history block in the audit export, beside the reopen
 context — the context the call was offered, auditable like every
 other input. Computing a dossier mutates nothing; the golden pack
 (G59–G61) pins it byte-pure.
+
+## Template effectiveness: do the drafts earn their place?
+
+The template draft is the only text this system ever composes
+toward a customer — and it is deliberately rare (a confident
+how_to, no flags, guardrails green, never a reopen, never a
+duplicate). Rare is not the same as good. The effectiveness report
+(`template_effectiveness.py`) grades each template by what
+happened to the tickets that carried it, over the runs whose
+later life is known — the ones with a recorded outcome:
+
+- **The link already rides the record.** A run that earned a
+  draft carries the template's name on it (`DraftInfo.template`,
+  e.g. `how_to_first_response[api]` — the one template family,
+  bound to how_to and keyed by product area). Nothing new is
+  recorded; the report reads what composition already wrote. A
+  record whose draft carries no name — the shape a pre-link
+  record would have — is counted in the totals and its category's
+  baseline as *unknown template*, and attributed to no template:
+  history is never backfilled with a guess.
+- **Three rates, defined from the outcome vocabulary only.**
+  *Resolution*: the outcome's `resolved` flag. *Reopen*: a later
+  run's reopen chain roots at the run — the customer came back,
+  however the follow-up was worded. *Escalation*: the outcome's
+  final queue is a human escalation queue (compliance review,
+  engineering escalation) that triage had *not* routed the run
+  to — the agent who handled it moved it up by hand. Rates are
+  withheld below five outcome-bearing uses (the counts always
+  stand), and confirmed duplicates are excluded from the rates
+  and named in the totals — a duplicate is not a second opinion
+  about a template.
+- **The flag advises; it never acts.** A template whose reopen
+  rate beats its category's baseline reopen rate by more than
+  0.25 is flagged `needs_review` — a note for the humans who own
+  the template, printed with both rates. Nothing is suppressed
+  and nothing recomposes: composition never reads the report, and
+  the golden pack pins a probe ticket composing byte-identically
+  with the flag standing, draft included.
+
+Surfaces: `GET /api/stats/templates`, a template-effectiveness
+section on the dashboards, and a block in the run audit export
+carrying the track record of the template the exported run
+itself used — the population evidence beside the one run.
+Golden G64–G65 pin the arithmetic (hand-counted), the withheld
+rates, the unknown-template accounting, and the firewall.
 
 ## Batch, compare, similar tickets, SLA clocks, events, webhooks
 
