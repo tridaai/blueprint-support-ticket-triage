@@ -231,6 +231,17 @@
         <span class="note" id="sim-status"></span>
       </div>
       <div id="sim-results" style="margin-top:12px"></div>
+      <h2 style="margin-top:18px">Policy impact replay (server-side, all stored runs)</h2>
+      <p class="note">The grown-up what-if: every stored run's recorded answers — decided runs included — are replayed through the real composition code under a hypothetical policy. No backend is called and nothing is saved; the report names the runs that would have landed differently.</p>
+      <div id="replay-weights" style="margin-top:8px"></div>
+      <label for="replay-threshold">Category-confidence forcing threshold: <strong id="replay-threshold-val">0.55</strong></label>
+      <input type="range" id="replay-threshold" min="0" max="1" step="0.05" value="0.55">
+      <label style="margin-top:8px"><input type="checkbox" id="replay-boost" checked style="width:auto"> Outage boost applied</label>
+      <div class="row" style="margin-top:10px">
+        <button class="primary" id="replay-run">Run replay</button>
+        <span class="note" id="replay-status"></span>
+      </div>
+      <div id="replay-results" style="margin-top:12px"></div>
     </section>
   </div>
   <div class="row" style="margin-top:4px">
@@ -407,6 +418,11 @@ function renderResult(r) {
       <dt>Autonomy</dt><dd>${r.autonomy.eligible ? pill('auto-resolvable class', 'good') : 'not eligible'} <span class="note">(advisory only — never acted on)${r.autonomy.blockers && r.autonomy.blockers.length ? ' · ' + r.autonomy.blockers.map(esc).join('; ') : ''}</span></dd>
       ${r.outcome ? `<dt>Outcome</dt><dd>${pill('recorded', 'good')} final: ${esc(r.outcome.final_category || '—')} → ${esc(r.outcome.final_queue || '—')} · ${r.outcome.resolved ? 'resolved' : 'not resolved'}${r.outcome.recorded_by ? ` · by ${esc(r.outcome.recorded_by)}` : ''}</dd>` : ''}
     </dl>
+    <div class="row" style="margin-top:10px">
+      <button id="export-json">Export audit record (JSON)</button>
+      <button id="export-text">Export audit record (text)</button>
+      <span class="note" id="export-status"></span>
+    </div>
     ${r.injection_flags && r.injection_flags.length ? `<p class="flag">Injection screen: ${r.injection_flags.map(esc).join(' · ')}</p>` : ''}
     <h2 style="margin-top:18px">Decisions — every question, with its distribution</h2>
     ${renderAnswers(r.answers || [])}
@@ -423,6 +439,8 @@ function renderResult(r) {
     <ul>${trace}</ul>`;
   loadSimilar(r.ticket_id);
   loadAssignment(r.ticket_id);
+  $('export-json').onclick = () => downloadExport(r.ticket_id, 'json');
+  $('export-text').onclick = () => downloadExport(r.ticket_id, 'text');
   const waiting = r.status === 'awaiting_agent';
   $('gate-section').style.display = waiting ? '' : 'none';
   $('gate-status').textContent = waiting ? '' : `already decided (${r.status})`;
@@ -437,6 +455,24 @@ function renderResult(r) {
     });
     $('o-status').textContent = 'an outcome is already recorded — saving replaces it';
   } else { $('o-status').textContent = ''; }
+}
+
+async function downloadExport(id, format) {
+  // The audit export (GET /api/runs/{id}/export): one portable
+  // document per run, composed server-side from the stored record.
+  $('export-status').textContent = 'building export…';
+  try {
+    const res = await fetch(`/api/runs/${encodeURIComponent(id)}/export?format=${format}`, {headers: headers()});
+    if (!res.ok) throw new Error(res.statusText);
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `${id}-audit-export.${format === 'text' ? 'txt' : 'json'}`;
+    a.click();
+    URL.revokeObjectURL(url);
+    $('export-status').textContent = 'export downloaded';
+  } catch (e) { $('export-status').textContent = 'export failed: ' + e.message; }
 }
 
 async function openTicket(id) {
@@ -700,6 +736,16 @@ function renderPolicy() {
       <p class="note" style="margin-top:6px">Guardrails force human review below category confidence ${POLICY.guardrails.category_min_confidence}; verify answers are decisive outside (${POLICY.guardrails.verify_decisive_low}, ${POLICY.guardrails.verify_decisive_high}). Autonomy bar: category in {${POLICY.autonomy.auto_resolvable_categories.map(esc).join(', ')}} at confidence ≥ ${POLICY.autonomy.min_category_confidence} — ${esc(POLICY.autonomy.note)}.</p>
       ${POLICY.sla ? `<p class="note" style="margin-top:6px"><strong>SLA clock targets</strong> (deterministic — separate from the model's sla_breach_risk judgement): ${Object.entries(POLICY.sla.target_hours).map(([b, h]) => `${esc(b)} ${h}h`).join(' · ')}; due soon in the last ${(POLICY.sla.due_soon_fraction * 100).toFixed(0)}% of the clock.</p>` : ''}</div>
     </div>`;
+  renderReplayWeights();
+}
+
+function renderReplayWeights() {
+  if (!POLICY) return;
+  $('replay-weights').innerHTML = Object.entries(POLICY.priority.weights).map(([k, v]) =>
+    `<label style="display:inline-block;margin:0 14px 6px 0">${esc(k)} <input type="number" id="rw-${esc(k)}" min="0" max="1" step="0.05" value="${v}" style="width:78px"></label>`).join('') +
+    '<div class="note">Priority weights for the hypothetical — they must sum to 1; the server rejects a set that does not.</div>';
+  $('replay-threshold').value = POLICY.guardrails.category_min_confidence;
+  $('replay-threshold-val').textContent = Number(POLICY.guardrails.category_min_confidence).toFixed(2);
 }
 
 // ---------------------------------------------------------------- dashboards
@@ -854,6 +900,42 @@ $('sim-run').onclick = async () => {
     `<p style="margin:0 0 6px"><strong>Simulation</strong> over ${rows.length} open tickets (threshold ${threshold.toFixed(2)}, outage boost ${boostOn ? 'on' : 'off'}): <strong>${queueChanges}</strong> would change queue · <strong>${newForced}</strong> would newly flip to human review · <strong>${bandChanges}</strong> would change priority band.</p>` +
     (affected.length ? `<table><tr><th>Ticket</th><th>What changes</th></tr>${affected.join('')}</table>` : '<p class="note">No open ticket changes under this policy.</p>');
 };
+
+// ---------------------------------------------------------------- impact replay
+$('replay-threshold').oninput = () => { $('replay-threshold-val').textContent = Number($('replay-threshold').value).toFixed(2); };
+$('replay-run').onclick = async () => {
+  if (!POLICY) await loadPolicy();
+  if (!POLICY) { $('replay-status').textContent = 'policy unavailable'; return; }
+  const weights = {};
+  for (const k of Object.keys(POLICY.priority.weights)) weights[k] = Number($(`rw-${k}`).value);
+  const body = {
+    category_min_confidence: Number($('replay-threshold').value),
+    weights,
+    outage_boost: $('replay-boost').checked,
+  };
+  $('replay-status').textContent = 'replaying every stored run…';
+  try {
+    const res = await fetch('/api/policy/replay', {method: 'POST', headers: headers(), body: JSON.stringify(body)});
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || res.statusText);
+    $('replay-status').textContent = '';
+    renderReplay(data);
+  } catch (e) { $('replay-status').textContent = 'error: ' + e.message; }
+};
+
+function renderReplay(d) {
+  const pairs = obj => Object.entries(obj || {}).map(([k, v]) => `${esc(k)}: ${v}`).join(' · ') || 'none';
+  const side = s => `${esc(s.queue)}<br>${esc(s.priority_band)} · ${Number(s.priority_score).toFixed(1)}<br><span class="note">guardrails ${s.guardrails_passed ? 'passed' : 'FAILED'}${s.requires_human_review ? ' · review forced' : ''}</span>`;
+  const rows = (d.moved_runs || []).map(m =>
+    `<tr><td>${esc(m.ticket_id)}<br><span class="note">${esc(m.status)}</span></td><td>${m.changes.map(esc).join('<br>')}</td><td>${side(m.before)}</td><td>${side(m.after)}</td></tr>`).join('');
+  $('replay-results').innerHTML =
+    `<p style="margin:0 0 6px"><strong>Replay</strong> over ${d.runs_replayed} stored run(s): <strong>${d.moved}</strong> would change · ${d.unchanged} unchanged · ${d.score_changed} would score differently</p>` +
+    `<p class="note" style="margin:0 0 4px">By queue pair: ${pairs(d.by_queue_pair)}</p>` +
+    `<p class="note" style="margin:0 0 4px">By band pair: ${pairs(d.by_band_pair)}</p>` +
+    `<p class="note" style="margin:0 0 8px">By guardrail flip: ${pairs(d.by_guardrail_flip)}</p>` +
+    (rows ? `<table><tr><th>Ticket</th><th>Changes</th><th>Before</th><th>After (hypothetical)</th></tr>${rows}</table>` : '<p class="note">No stored run changes under this policy.</p>') +
+    `<p class="note" style="margin-top:6px">${esc(d.note)}</p>`;
+}
 
 // ---------------------------------------------------------------- outcome form
 const VERIFY_TRUTH_KEYS = ['contains_pii', 'is_abusive', 'mentions_legal', 'is_outage_report', 'needs_engineering'];
