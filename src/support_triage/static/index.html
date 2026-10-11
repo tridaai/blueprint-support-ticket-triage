@@ -66,6 +66,21 @@
   .footer-brand img { height:32px; width:auto; opacity:.8; }
   .footer-brand a { color:var(--indigo); text-decoration:none; font-weight:600; font-size:12.5px; }
   .footer-brand a:hover { text-decoration:underline; }
+  .viewtabs { max-width:1440px; margin:0 auto; padding:14px 28px 0; display:flex; gap:8px; }
+  .viewtabs button { font-weight:600; }
+  .viewtabs button.active { background:var(--indigo); border-color:var(--indigo); color:#fff; }
+  .filters { display:grid; grid-template-columns:1fr 1fr; gap:6px; margin-bottom:10px; }
+  .filters select, .filters input[type=text] { padding:6px 8px; font-size:12.5px; }
+  .tiles { display:grid; grid-template-columns:repeat(auto-fit, minmax(120px, 1fr)); gap:10px; margin-bottom:14px; }
+  .tile { border:1px solid var(--line); border-radius:8px; padding:10px 12px; background:var(--soft); }
+  .tile .num { font-size:22px; font-weight:700; }
+  .tile .lab { font-size:11.5px; color:var(--muted); text-transform:uppercase; letter-spacing:.05em; }
+  .dash-grid { display:grid; grid-template-columns:1fr 1fr; gap:22px; }
+  @media (max-width: 900px) { .dash-grid { grid-template-columns:1fr; } }
+  .count-row { display:grid; grid-template-columns: 170px 1fr 52px; gap:10px; align-items:center; font-size:12.5px; margin:3px 0; }
+  .count-row .opt { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .truth-grid { display:grid; grid-template-columns:1fr 110px; gap:4px 10px; align-items:center; font-size:13px; }
+  input[type=range] { width:100%; }
 </style>
 </head>
 <body>
@@ -86,7 +101,12 @@
 </div>
 </header>
 
-<main>
+<nav class="viewtabs">
+  <button id="tab-console" class="active">Triage console</button>
+  <button id="tab-dashboards">Dashboards</button>
+</nav>
+
+<main id="view-console">
   <div>
     <section>
       <h2>1 · Pick a ticket</h2>
@@ -108,6 +128,14 @@
     </section>
     <section>
       <h2>Agent queue</h2>
+      <div class="filters">
+        <select id="f-queue"><option value="">queue: any</option></select>
+        <select id="f-status"><option value="">status: open (awaiting)</option><option value="awaiting_agent">awaiting_agent</option><option value="triaged">triaged</option><option value="rejected">rejected</option></select>
+        <select id="f-band"><option value="">band: any</option><option>critical</option><option>high</option><option>medium</option><option>low</option></select>
+        <select id="f-flag"><option value="">flag: any</option><option>contains_pii</option><option>is_abusive</option><option>mentions_legal</option><option>is_outage_report</option><option>needs_engineering</option></select>
+        <input type="text" id="f-backend" placeholder="backend (e.g. offline)">
+        <input type="text" id="f-q" placeholder="search subject / sender">
+      </div>
       <div id="queue" class="empty">Loading…</div>
       <div class="row" style="margin-top:10px">
         <button id="queue-refresh">Refresh</button>
@@ -141,6 +169,64 @@
       </div>
       <p class="note">Approving records that an agent accepted this triage and routing. The system sends nothing to the customer — a template draft, when offered, is text for the agent to send themselves.</p>
     </section>
+    <section id="outcome-section" style="display:none">
+      <h2>4 · Record outcome (ground truth)</h2>
+      <p class="note">After handling the ticket, record what was actually true. Outcomes are the labels live calibration scores the recorded probabilities against (Dashboards view).</p>
+      <label for="o-category">Final category</label>
+      <select id="o-category"><option value="">— not judged —</option></select>
+      <label for="o-queue">Final queue</label>
+      <select id="o-queue"><option value="">— not judged —</option></select>
+      <div class="truth-grid" style="margin-top:10px" id="o-truths"></div>
+      <label style="margin-top:10px"><input type="checkbox" id="o-resolved" style="width:auto"> Resolved</label>
+      <div class="row" style="margin-top:10px">
+        <button class="primary" id="o-submit">Record outcome</button>
+        <span class="note" id="o-status"></span>
+      </div>
+    </section>
+  </div>
+</main>
+
+<main id="view-dashboards" style="display:none; grid-template-columns:1fr">
+  <div class="dash-grid">
+    <section>
+      <h2>Queue health</h2>
+      <div id="d-tiles" class="tiles"></div>
+      <div id="d-queues"></div>
+      <div id="d-bands" style="margin-top:10px"></div>
+      <div id="d-categories" style="margin-top:10px"></div>
+    </section>
+    <section>
+      <h2>Automation &amp; guardrails</h2>
+      <div id="d-rates"></div>
+      <div id="d-flags" style="margin-top:12px"></div>
+      <div id="d-guardrail-failures" style="margin-top:12px"></div>
+    </section>
+    <section>
+      <h2>Backend performance</h2>
+      <div id="d-performance"></div>
+    </section>
+    <section>
+      <h2>Calibration — eval pack vs live outcomes</h2>
+      <div id="d-calibration"></div>
+    </section>
+    <section style="grid-column: 1 / -1">
+      <h2>Policy — what the runs were composed under</h2>
+      <div id="d-policy"></div>
+      <h2 style="margin-top:18px">Policy what-if (simulation)</h2>
+      <p class="note">Recomputes the currently open tickets in your browser under a hypothetical policy. Nothing is saved, sent, or changed on any record.</p>
+      <label for="sim-threshold">Category-confidence forcing threshold: <strong id="sim-threshold-val">0.55</strong> (below this, a ticket flips to human review)</label>
+      <input type="range" id="sim-threshold" min="0" max="1" step="0.05" value="0.55">
+      <label style="margin-top:8px"><input type="checkbox" id="sim-boost" checked style="width:auto"> Outage boost applied</label>
+      <div class="row" style="margin-top:10px">
+        <button class="primary" id="sim-run">Run simulation</button>
+        <span class="note" id="sim-status"></span>
+      </div>
+      <div id="sim-results" style="margin-top:12px"></div>
+    </section>
+  </div>
+  <div class="row" style="margin-top:4px">
+    <button id="dash-refresh">Refresh dashboards</button>
+    <span class="note">Aggregates over every stored run — the same numbers as <code>GET /api/stats/*</code>.</span>
   </div>
 </main>
 
@@ -208,10 +294,21 @@ async function loadEvals() {
   } catch (e) { $('calibration').textContent = 'No calibration results yet — run `make evals`.'; }
 }
 
+function queueParams() {
+  const params = new URLSearchParams();
+  const map = {'f-queue': 'queue', 'f-status': 'status', 'f-band': 'priority_band', 'f-flag': 'flag', 'f-backend': 'backend', 'f-q': 'q'};
+  for (const [id, name] of Object.entries(map)) {
+    const v = $(id).value.trim();
+    if (v) params.set(name, v);
+  }
+  return params.toString();
+}
+
 async function loadQueue() {
-  const res = await fetch('/queue', {headers: headers()});
+  const qs = queueParams();
+  const res = await fetch('/queue' + (qs ? '?' + qs : ''), {headers: headers()});
   const data = await res.json();
-  if (!data.tickets || !data.tickets.length) { $('queue').className = 'empty'; $('queue').textContent = 'Queue is empty.'; return; }
+  if (!data.tickets || !data.tickets.length) { $('queue').className = 'empty'; $('queue').textContent = qs ? 'No tickets match the filters.' : 'Queue is empty.'; return; }
   $('queue').className = '';
   $('queue').innerHTML = `<table><tr><th>Ticket</th><th>Category</th><th>Priority</th><th>Queue</th><th>Conf.</th></tr>` +
     data.tickets.map(t => `<tr class="clickable" data-id="${esc(t.ticket_id)}"><td>${esc(t.ticket_id)}<br><span class="note">${esc(t.subject)}</span></td><td>${esc(t.category)}${t.requires_human_review ? ' <span class="flag">review</span>' : ''}${t.is_duplicate ? ' <span class="pill warn">dup</span>' : ''}</td><td>${t.priority_score.toFixed(1)} ${bandPill(t.priority_band)}</td><td>${esc(t.queue)}</td><td>${(t.category_confidence*100).toFixed(0)}%</td></tr>`).join('') + `</table>`;
@@ -260,6 +357,7 @@ function renderResult(r) {
       <dt>Duplicate</dt><dd>${r.duplicate && r.duplicate.is_duplicate ? `<span class="flag">probable duplicate of ${esc(r.duplicate.similar_ticket_id)}</span> (similarity ${Number(r.duplicate.similarity).toFixed(3)})` : `no (nearest similarity ${r.duplicate ? Number(r.duplicate.similarity).toFixed(3) : '—'})`}</dd>
       <dt>Human review</dt><dd>${r.guardrails.requires_human_review ? '<span class="flag">forced</span> — ' + r.guardrails.human_review_reasons.map(esc).join('; ') : 'not forced'}</dd>
       <dt>Autonomy</dt><dd>${r.autonomy.eligible ? pill('auto-resolvable class', 'good') : 'not eligible'} <span class="note">(advisory only — never acted on)${r.autonomy.blockers && r.autonomy.blockers.length ? ' · ' + r.autonomy.blockers.map(esc).join('; ') : ''}</span></dd>
+      ${r.outcome ? `<dt>Outcome</dt><dd>${pill('recorded', 'good')} final: ${esc(r.outcome.final_category || '—')} → ${esc(r.outcome.final_queue || '—')} · ${r.outcome.resolved ? 'resolved' : 'not resolved'}${r.outcome.recorded_by ? ` · by ${esc(r.outcome.recorded_by)}` : ''}</dd>` : ''}
     </dl>
     ${r.injection_flags && r.injection_flags.length ? `<p class="flag">Injection screen: ${r.injection_flags.map(esc).join(' · ')}</p>` : ''}
     <h2 style="margin-top:18px">Decisions — every question, with its distribution</h2>
@@ -274,6 +372,17 @@ function renderResult(r) {
   const waiting = r.status === 'awaiting_agent';
   $('gate-section').style.display = waiting ? '' : 'none';
   $('gate-status').textContent = waiting ? '' : `already decided (${r.status})`;
+  $('outcome-section').style.display = '';
+  if (r.outcome) {
+    $('o-category').value = r.outcome.final_category || '';
+    $('o-queue').value = r.outcome.final_queue || '';
+    $('o-resolved').checked = !!r.outcome.resolved;
+    document.querySelectorAll('#o-truths select').forEach(sel => {
+      const v = (r.outcome.verify_truth || {})[sel.dataset.key];
+      sel.value = v === undefined ? '' : String(v);
+    });
+    $('o-status').textContent = 'an outcome is already recorded — saving replaces it';
+  } else { $('o-status').textContent = ''; }
 }
 
 async function openTicket(id) {
@@ -329,10 +438,219 @@ $('assign').onclick = async () => {
   loadQueue();
 };
 $('queue-refresh').onclick = loadQueue;
+['f-queue', 'f-status', 'f-band', 'f-flag', 'f-backend'].forEach(id => $(id).onchange = loadQueue);
+$('f-q').oninput = () => { clearTimeout(window._qTimer); window._qTimer = setTimeout(loadQueue, 250); };
+
+// ---------------------------------------------------------------- views
+let dashboardsLoaded = false;
+function showView(name) {
+  const dash = name === 'dashboards';
+  $('view-console').style.display = dash ? 'none' : '';
+  $('view-dashboards').style.display = dash ? '' : 'none';
+  $('tab-console').classList.toggle('active', !dash);
+  $('tab-dashboards').classList.toggle('active', dash);
+  if (dash && !dashboardsLoaded) loadDashboards();
+}
+$('tab-console').onclick = () => showView('console');
+$('tab-dashboards').onclick = () => showView('dashboards');
+$('dash-refresh').onclick = loadDashboards;
+
+// ---------------------------------------------------------------- policy
+let POLICY = null;
+async function loadPolicy() {
+  try {
+    const res = await fetch('/api/policy', {headers: headers()});
+    if (!res.ok) return;
+    POLICY = await res.json();
+    const fq = $('f-queue');
+    POLICY.routing.queues.forEach(q => { const o = document.createElement('option'); o.value = q; o.textContent = q; fq.appendChild(o); });
+    const oc = $('o-category'), oq = $('o-queue');
+    POLICY.routing.categories.forEach(c => { const o = document.createElement('option'); o.value = c; o.textContent = c; oc.appendChild(o); });
+    POLICY.routing.queues.forEach(q => { const o = document.createElement('option'); o.value = q; o.textContent = q; oq.appendChild(o); });
+    const t = POLICY.guardrails.category_min_confidence;
+    $('sim-threshold').value = t; $('sim-threshold-val').textContent = Number(t).toFixed(2);
+    renderPolicy();
+  } catch (e) { /* policy panel stays empty offline */ }
+}
+
+function renderPolicy() {
+  if (!POLICY) { $('d-policy').innerHTML = '<p class="empty">Policy unavailable.</p>'; return; }
+  const w = Object.entries(POLICY.priority.weights).map(([k, v]) => `<tr><td>${esc(k)}</td><td>${v}</td></tr>`).join('');
+  const bands = POLICY.priority.bands.map(b => `${b.band} ≥ ${b.min_score}`).join(' · ');
+  const overrides = POLICY.routing.overrides.map(o => `<li>flag <strong>${esc(o.flag)}</strong> → ${esc(o.queue)} (precedence ${o.precedence})</li>`).join('');
+  const refinements = Object.entries(POLICY.routing.area_refinements).map(([k, v]) => `<li>${esc(k)} → ${esc(v)}</li>`).join('') || '<li>none</li>';
+  $('d-policy').innerHTML = `
+    <div class="dash-grid" style="gap:14px">
+      <div><p style="margin:0 0 6px"><strong>Priority formula</strong> <span class="note">(weights sum to 1; outage boost +${POLICY.priority.outage_boost} when P(outage) ≥ ${POLICY.priority.flag_threshold})</span></p>
+      <table><tr><th>Term</th><th>Weight</th></tr>${w}</table>
+      <p class="note" style="margin-top:6px">Bands: ${esc(bands)}</p></div>
+      <div><p style="margin:0 0 6px"><strong>Routing overrides</strong></p><ul>${overrides}</ul>
+      <p style="margin:10px 0 6px"><strong>Area refinements</strong></p><ul>${refinements}</ul>
+      <p class="note" style="margin-top:6px">Guardrails force human review below category confidence ${POLICY.guardrails.category_min_confidence}; verify answers are decisive outside (${POLICY.guardrails.verify_decisive_low}, ${POLICY.guardrails.verify_decisive_high}). Autonomy bar: category in {${POLICY.autonomy.auto_resolvable_categories.map(esc).join(', ')}} at confidence ≥ ${POLICY.autonomy.min_category_confidence} — ${esc(POLICY.autonomy.note)}.</p></div>
+    </div>`;
+}
+
+// ---------------------------------------------------------------- dashboards
+function countRows(title, obj) {
+  const entries = Object.entries(obj || {});
+  if (!entries.length) return '';
+  const max = Math.max(...entries.map(([, v]) => v), 1);
+  return `<p style="margin:0 0 4px"><strong>${esc(title)}</strong></p>` + entries.map(([k, v]) =>
+    `<div class="count-row"><span class="opt">${esc(k)}</span><div class="bar-track"><div class="bar-fill" style="width:${(v / max * 100).toFixed(1)}%"></div></div><span>${v}</span></div>`).join('');
+}
+function tile(num, lab) { return `<div class="tile"><div class="num">${esc(num)}</div><div class="lab">${esc(lab)}</div></div>`; }
+
+async function loadDashboards() {
+  dashboardsLoaded = true;
+  const [ov, perf, cal] = await Promise.all([
+    fetch('/api/stats/overview', {headers: headers()}).then(r => r.json()),
+    fetch('/api/stats/performance', {headers: headers()}).then(r => r.json()),
+    fetch('/api/stats/calibration', {headers: headers()}).then(r => r.json()),
+  ]);
+  if (!POLICY) await loadPolicy(); else renderPolicy();
+
+  $('d-tiles').innerHTML =
+    tile(ov.total_runs, 'total runs') +
+    tile((ov.by_status || {}).awaiting_agent || 0, 'awaiting agent') +
+    tile(ov.rates.low_confidence_forcing.count, 'forced review') +
+    tile(ov.rates.template_draft.count, 'drafts offered') +
+    tile(ov.outcomes_recorded, 'outcomes recorded') +
+    tile(perf.total_errors, 'failed runs');
+  $('d-queues').innerHTML = countRows('By queue', ov.by_queue) + countRows('By status', ov.by_status);
+  $('d-bands').innerHTML = countRows('Priority bands', ov.priority_bands);
+  $('d-categories').innerHTML = countRows('By category', ov.by_category);
+
+  const rateRow = (label, r) => barRow(`${label} — ${r.count} (${(r.rate * 100).toFixed(1)}%)`, r.rate);
+  $('d-rates').innerHTML =
+    rateRow('Low-confidence forcing', ov.rates.low_confidence_forcing) +
+    rateRow('Template draft offered', ov.rates.template_draft) +
+    rateRow('Autonomy recommended (never acted on)', ov.rates.autonomy_recommended);
+  $('d-flags').innerHTML = countRows('Safety flags raised', ov.safety_flags);
+  $('d-guardrail-failures').innerHTML = Object.keys(ov.guardrail_failures || {}).length
+    ? countRows('Guardrail failures by check', ov.guardrail_failures)
+    : '<p class="note">Guardrail failures: none recorded.</p>';
+
+  const perfRows = Object.entries(perf.by_backend || {}).map(([name, b]) =>
+    `<tr><td><strong>${esc(name)}</strong></td><td>${b.runs}</td><td>${b.decision_calls}</td><td>${b.decision_latency_ms.mean}</td><td>${b.decision_latency_ms.p50}</td><td>${b.decision_latency_ms.p95}</td><td>${b.input_tokens}</td><td>${b.output_tokens}</td><td>$${Number(b.estimated_cost_usd).toFixed(4)}</td><td>${b.errors}</td></tr>`).join('');
+  $('d-performance').innerHTML = perfRows
+    ? `<table><tr><th>Backend</th><th>Runs</th><th>Calls</th><th>Mean ms</th><th>p50 ms</th><th>p95 ms</th><th>Tokens in</th><th>Tokens out</th><th>Est. cost</th><th>Errors</th></tr>${perfRows}</table>`
+    : '<p class="empty">No runs yet.</p>';
+
+  renderCalibration(cal);
+}
+
+function binsTable(bins) {
+  const filled = (bins || []).filter(b => b.n);
+  if (!filled.length) return '';
+  return `<table><tr><th>Bin</th><th>n</th><th>Predicted</th><th>Empirical</th><th>Gap</th></tr>` +
+    filled.map(b => `<tr><td>${esc(b.bin)}</td><td>${b.n}</td><td>${b.mean_predicted}</td><td>${b.empirical}</td><td>${b.gap}</td></tr>`).join('') + `</table>`;
+}
+
+function renderCalibration(cal) {
+  let html = '';
+  const ev = cal.eval;
+  if (ev) {
+    const rows = Object.entries(ev.per_question || {}).map(([k, v]) =>
+      `<tr><td>${esc(k)}</td><td>${esc(v.kind)}</td><td>${v.n}</td><td>${Number(v.brier).toFixed(3)}</td></tr>`).join('');
+    html += `<p style="margin:0 0 6px"><strong>Eval pack</strong> (golden set, backend ${esc(ev.backend || '')}) — overall Brier <strong>${Number(ev.overall_brier).toFixed(3)}</strong> over ${ev.cases} cases</p>` +
+      (rows ? `<table><tr><th>Question</th><th>Kind</th><th>n</th><th>Brier</th></tr>${rows}</table>` : '');
+  } else {
+    html += `<p class="note">${esc(cal.eval_note || 'No eval results yet.')}</p>`;
+  }
+  const live = cal.live || {};
+  html += `<p style="margin:14px 0 6px"><strong>Live</strong> — agent outcomes</p>`;
+  if (!live.available) {
+    html += `<p class="empty">${esc(live.note || 'no agent outcomes recorded yet')} (${live.runs_with_outcomes || 0} of ${live.runs_total || 0} runs labelled)</p>`;
+  } else {
+    const acc = v => v === null || v === undefined ? '—' : (v * 100).toFixed(1) + '%';
+    html += `<p style="margin:0 0 6px">${live.runs_with_outcomes} labelled runs · category accuracy <strong>${acc(live.category_accuracy)}</strong> · queue accuracy <strong>${acc(live.queue_accuracy)}</strong> · resolution rate <strong>${acc(live.resolution_rate)}</strong> · overall Brier <strong>${Number(live.overall_brier).toFixed(3)}</strong></p>`;
+    html += Object.entries(live.per_question || {}).map(([k, v]) =>
+      `<div class="qblock"><div class="qhead"><span class="qk">${esc(k)}</span><span class="pill">${esc(v.kind)}</span><span class="note">n=${v.n} · Brier ${Number(v.brier).toFixed(3)}${v.kind === 'score' ? ` · high-event Brier ${Number(v.high_event_brier).toFixed(3)} · MAE ${Number(v.mae).toFixed(2)}` : ''}</span></div>${binsTable(v.bins)}</div>`).join('');
+  }
+  $('d-calibration').innerHTML = html;
+}
+
+// ---------------------------------------------------------------- what-if
+function simRoute(r, policy) {
+  const flags = (r.composition && r.composition.flags) || {};
+  let queue = (policy.routing.area_refinements || {})[`${r.category} × ${r.product_area}`]
+    || policy.routing.category_queues[r.category] || 'general_support';
+  const ordered = [...policy.routing.overrides].sort((a, b) => a.precedence - b.precedence);
+  for (const o of ordered) { if (flags[o.flag]) { queue = o.queue; break; } }
+  return queue;
+}
+function simBand(score, policy) {
+  for (const b of policy.priority.bands) { if (score >= b.min_score) return b.band; }
+  return 'low';
+}
+
+$('sim-threshold').oninput = () => { $('sim-threshold-val').textContent = Number($('sim-threshold').value).toFixed(2); };
+$('sim-run').onclick = async () => {
+  if (!POLICY) await loadPolicy();
+  if (!POLICY) { $('sim-status').textContent = 'policy unavailable'; return; }
+  $('sim-status').textContent = 'simulating…';
+  const queueRes = await fetch('/queue', {headers: headers()});
+  const rows = (await queueRes.json()).tickets || [];
+  const records = await Promise.all(rows.map(row =>
+    fetch(`/tickets/${encodeURIComponent(row.ticket_id)}`, {headers: headers()}).then(r => r.ok ? r.json() : null)));
+  const threshold = Number($('sim-threshold').value);
+  const boostOn = $('sim-boost').checked;
+  let queueChanges = 0, newForced = 0, bandChanges = 0;
+  const affected = [];
+  records.filter(Boolean).forEach(r => {
+    const changes = [];
+    const newQueue = simRoute(r, POLICY);
+    if (newQueue !== r.composition.queue) { queueChanges++; changes.push(`queue ${r.composition.queue} → ${newQueue}`); }
+    const catConf = (r.answers.find(a => a.key === 'category') || {}).confidence ?? 0;
+    const forcedNow = !!r.guardrails.requires_human_review;
+    const forcedNew = catConf < threshold;
+    if (forcedNew && !forcedNow) { newForced++; changes.push(`flips to human review (category confidence ${catConf.toFixed(2)} < ${threshold.toFixed(2)})`); }
+    let score = r.composition.priority_score;
+    if (!boostOn && r.composition.outage_boost_applied) score = Math.max(0, score - POLICY.priority.outage_boost);
+    const newBand = simBand(score, POLICY);
+    if (newBand !== r.composition.priority_band) { bandChanges++; changes.push(`band ${r.composition.priority_band} → ${newBand} (score ${score.toFixed(1)})`); }
+    if (changes.length) affected.push(`<tr><td>${esc(r.ticket_id)}</td><td>${changes.map(esc).join('<br>')}</td></tr>`);
+  });
+  $('sim-status').textContent = '';
+  $('sim-results').innerHTML =
+    `<p style="margin:0 0 6px"><strong>Simulation</strong> over ${rows.length} open tickets (threshold ${threshold.toFixed(2)}, outage boost ${boostOn ? 'on' : 'off'}): <strong>${queueChanges}</strong> would change queue · <strong>${newForced}</strong> would newly flip to human review · <strong>${bandChanges}</strong> would change priority band.</p>` +
+    (affected.length ? `<table><tr><th>Ticket</th><th>What changes</th></tr>${affected.join('')}</table>` : '<p class="note">No open ticket changes under this policy.</p>');
+};
+
+// ---------------------------------------------------------------- outcome form
+const VERIFY_TRUTH_KEYS = ['contains_pii', 'is_abusive', 'mentions_legal', 'is_outage_report', 'needs_engineering'];
+$('o-truths').innerHTML = VERIFY_TRUTH_KEYS.map(k =>
+  `<span>${esc(k)}</span><select data-key="${esc(k)}"><option value="">not judged</option><option value="true">was true</option><option value="false">was false</option></select>`).join('');
+
+$('o-submit').onclick = async () => {
+  if (!currentId) return;
+  const verify_truth = {};
+  document.querySelectorAll('#o-truths select').forEach(sel => {
+    if (sel.value !== '') verify_truth[sel.dataset.key] = sel.value === 'true';
+  });
+  const body = {
+    final_category: $('o-category').value,
+    final_queue: $('o-queue').value,
+    resolved: $('o-resolved').checked,
+    by: $('actor').value.trim(),
+    verify_truth,
+    score_truth: {},
+  };
+  $('o-status').textContent = 'recording…';
+  const res = await fetch(`/api/runs/${encodeURIComponent(currentId)}/outcome`, {
+    method: 'POST', headers: headers(), body: JSON.stringify(body)
+  });
+  const data = await res.json();
+  if (!res.ok) { $('o-status').textContent = 'error: ' + (data.detail || res.statusText); return; }
+  renderResult(data);
+  $('o-status').textContent = 'outcome recorded — live calibration updated on the Dashboards view';
+  dashboardsLoaded = false;
+};
 
 loadSamples();
 loadEvals();
 loadQueue();
+loadPolicy();
 </script>
 </body>
 </html>
