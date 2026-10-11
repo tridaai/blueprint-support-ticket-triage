@@ -17,7 +17,11 @@ Shape (one pass, then a human gate)::
 - ``compose`` turns distributions into consequences in code —
   priority formula, routing matrix + overrides, guardrails, autonomy
   recommendation, the rare template draft — and assembles the
-  decision record.
+  decision record. On a reopen run (service-set state), compose also
+  applies the reopen consequences: the decision call receives the
+  prior run's record as port context, the priority band is floored
+  one step up, the template draft is suppressed in code, and the
+  reopen-limit guardrail can force human review.
 - ``agent_gate`` pauses the graph (LangGraph ``interrupt``) with the
   record saved and status ``awaiting_agent``. Nothing has been sent
   to anyone; nothing ever is, by this system.
@@ -53,6 +57,7 @@ from .schemas import (
     DuplicateInfo,
     GuardrailInfo,
     QuestionAnswer,
+    ReopenInfo,
     RunTelemetry,
     TicketInput,
     TicketResult,
@@ -84,6 +89,14 @@ class TriageState(TypedDict, total=False):
     decision: dict
     trace: list[dict]
     started_at: float
+    # Reopen runs only (set by the service): the chain links, the
+    # limit in force, and the prior run's record as context text for
+    # the decide node. Absent/empty on a first-pass run.
+    reopen: dict
+    prior_context: str
+    # The conversation thread this run belongs to (threads.py),
+    # assigned by the service at intake.
+    thread_id: str
 
 
 @dataclass
@@ -205,7 +218,13 @@ def build_graph(
 
     def decide(state: TriageState) -> dict:
         ticket = TicketInput.model_validate(state["ticket"])
-        decisions = engine.decide(state["state_text"], questions)
+        # On a reopen, the prior run's record rides as the port's
+        # context argument — fenced history for the LLM/Jev adapters,
+        # ignored by the offline heuristics; state_text itself is
+        # still only the new (screened) customer message.
+        decisions = engine.decide(
+            state["state_text"], questions, context=state.get("prior_context", "")
+        )
         sink.emit(
             RunEvent(
                 type="decision_made",
@@ -246,8 +265,16 @@ def build_graph(
             latency_ms=meta["latency_ms"],
             usage=meta.get("usage", {}),
         )
-        composed = comp.compose(decisions)
-        verdict = guard.run_guardrails(decisions, question_keys)
+        reopen = state.get("reopen") or {}
+        is_reopen = bool(reopen)
+        composed = comp.compose(decisions, reopen=is_reopen)
+        verdict = guard.run_guardrails(
+            decisions,
+            question_keys,
+            reopen=(int(reopen["reopen_count"]), int(reopen["reopen_limit"]))
+            if is_reopen
+            else None,
+        )
         duplicate = DuplicateInfo.model_validate(state["duplicate"])
         autonomy = comp.recommend_autonomy(
             decisions,
@@ -255,6 +282,7 @@ def build_graph(
             guardrails_passed=verdict.passed,
             requires_human_review=verdict.requires_human_review,
             is_duplicate=duplicate.is_duplicate,
+            is_reopen=is_reopen,
         )
         draft = build_template_draft(
             decisions,
@@ -262,6 +290,7 @@ def build_graph(
             verdict,
             sender_name=ticket.sender_name,
             is_duplicate=duplicate.is_duplicate,
+            is_reopen=is_reopen,
         )
         usage = meta.get("usage", {})
         telemetry = RunTelemetry(
@@ -302,6 +331,23 @@ def build_graph(
             guardrails=GuardrailInfo(**verdict.as_dict()),
             autonomy=AutonomyInfo(**autonomy.as_dict()),
             draft=draft,
+            reopen=(
+                ReopenInfo(
+                    prior_run_id=str(reopen["prior_run_id"]),
+                    root_ticket_id=str(reopen["root_ticket_id"]),
+                    reopen_count=int(reopen["reopen_count"]),
+                    reopen_limit=int(reopen["reopen_limit"]),
+                    limit_hit=int(reopen["reopen_count"]) >= int(reopen["reopen_limit"]),
+                    reopened_by=str(reopen.get("reopened_by", "")),
+                    reopened_at=str(reopen.get("reopened_at", "")),
+                    context_provided=bool(state.get("prior_context")),
+                    context_use=str(reopen.get("context_use", "")),
+                    template_suppressed=True,
+                )
+                if is_reopen
+                else None
+            ),
+            thread_id=state.get("thread_id", ""),
             external_action_taken=False,
             telemetry=telemetry,
         )
@@ -315,17 +361,30 @@ def build_graph(
                 },
             )
         )
+        details = [
+            f"priority: {composed.priority_score} ({composed.priority_band})",
+            f"queue: {composed.queue} — {composed.routing_reason}",
+            f"guardrails: {'passed' if verdict.passed else 'FAILED'}"
+            + ("; human review forced" if verdict.requires_human_review else ""),
+            f"autonomy recommendation: {'eligible' if autonomy.eligible else 'not eligible'}"
+            " (advisory only — never acted on)",
+            "status: awaiting_agent — nothing sent to the customer",
+        ]
+        if is_reopen:
+            details.append(
+                f"reopen #{reopen['reopen_count']} of {reopen['prior_run_id']} "
+                f"(chain root {reopen['root_ticket_id']}, limit {reopen['reopen_limit']})"
+            )
+            details.append(
+                f"reopen floor: band raised {composed.band_before_floor} → "
+                f"{composed.priority_band}"
+                if composed.band_before_floor != composed.priority_band
+                else "reopen floor: band already critical — floor applied, no raise possible"
+            )
+            details.append("template draft: suppressed (reopen runs never get the canned draft)")
         return {
             "result": result.model_dump(),
-            "_details": [
-                f"priority: {composed.priority_score} ({composed.priority_band})",
-                f"queue: {composed.queue} — {composed.routing_reason}",
-                f"guardrails: {'passed' if verdict.passed else 'FAILED'}"
-                + ("; human review forced" if verdict.requires_human_review else ""),
-                f"autonomy recommendation: {'eligible' if autonomy.eligible else 'not eligible'}"
-                " (advisory only — never acted on)",
-                "status: awaiting_agent — nothing sent to the customer",
-            ],
+            "_details": details,
         }
 
     def agent_gate(state: TriageState) -> dict:

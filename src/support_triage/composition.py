@@ -24,6 +24,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from .config import env_int
 from .decisions import DecisionSet
 
 # --- priority formula ---------------------------------------------------
@@ -42,6 +43,23 @@ FLAG_THRESHOLD = 0.5  # a verify answer counts as "raised" at this probability
 
 # Priority bands (score ranges are part of the eval contract).
 BANDS = ((80.0, "critical"), (55.0, "high"), (30.0, "medium"), (0.0, "low"))
+
+# --- reopen policy --------------------------------------------------------
+# A reopened ticket has already failed the customer once, so its
+# composed band is floored one step above the band its answers alone
+# earn (see compose's ``reopen`` argument) — the floor is recorded on
+# the run like the outage boost, never applied invisibly. And a chain
+# may only be reopened so many times through the normal path: the
+# reopen that reaches REOPEN_LIMIT is forced to human review by the
+# guardrails (guardrails.py) instead of being routed by composition
+# alone. The limit is a deployment knob (env REOPEN_LIMIT); the
+# default and the floor live here with the other policy constants.
+REOPEN_LIMIT_DEFAULT = 2
+
+
+def reopen_limit_in_force() -> int:
+    """The chain reopen limit for runs composed now (env-overridable)."""
+    return env_int("REOPEN_LIMIT", REOPEN_LIMIT_DEFAULT)
 
 
 # --- SLA clock targets ----------------------------------------------------
@@ -107,6 +125,10 @@ class Composition:
     routing_reason: str
     override: str = ""  # "" | legal | outage | engineering
     flags: dict[str, bool] = field(default_factory=dict)  # verify key -> raised?
+    # The reopen floor, when it ran: the band was raised one step
+    # from ``band_before_floor``. Recorded on the run either way.
+    reopen_floor_applied: bool = False
+    band_before_floor: str = ""
     # The weights this composition was actually scored under — the
     # module constants for a live run, a hypothetical set for a replay
     # (replay.py). Recorded on the run either way.
@@ -118,6 +140,8 @@ class Composition:
             "priority_band": self.priority_band,
             "contributions": self.contributions,
             "outage_boost_applied": self.outage_boost_applied,
+            "reopen_floor_applied": self.reopen_floor_applied,
+            "band_before_floor": self.band_before_floor,
             "queue": self.queue,
             "routing_reason": self.routing_reason,
             "override": self.override,
@@ -126,17 +150,31 @@ class Composition:
         }
 
 
+def _raise_one_band(band: str) -> str:
+    """One step up the band ladder (critical stays critical)."""
+    ladder = [name for _floor, name in reversed(BANDS)]  # low → critical
+    index = ladder.index(band) if band in ladder else 0
+    return ladder[min(index + 1, len(ladder) - 1)]
+
+
 def compose(
     decisions: DecisionSet,
     *,
     weights: dict[str, float] | None = None,
     outage_boost: float | None = None,
+    reopen: bool = False,
 ) -> Composition:
     """Priority + routing for one validated decision set.
 
     ``weights`` / ``outage_boost`` override the module policy for
     this call only (the impact replay, replay.py); the defaults are
     the live policy and every existing caller passes neither.
+
+    ``reopen`` applies the reopen priority floor: the band is raised
+    one step from the band the score earns (the score itself is
+    untouched — the floor is a band rule, recorded on the result).
+    The replay passes it for stored reopen runs so history recomposes
+    exactly as it was composed.
     """
     effective_weights = dict(weights) if weights is not None else PRIORITY_WEIGHTS
     boost_points = OUTAGE_BOOST if outage_boost is None else outage_boost
@@ -189,11 +227,19 @@ def compose(
         queue, override = "engineering_escalation", "engineering"
         reason = f"override: needs_engineering (p={decisions.probability('needs_engineering'):.2f}) → engineering_escalation"
 
+    band = priority_band(score)
+    band_before_floor = ""
+    if reopen:
+        band_before_floor = band
+        band = _raise_one_band(band)
+
     return Composition(
         priority_score=score,
-        priority_band=priority_band(score),
+        priority_band=band,
         contributions=contributions,
         outage_boost_applied=outage,
+        reopen_floor_applied=reopen,
+        band_before_floor=band_before_floor,
         queue=queue,
         routing_reason=reason,
         override=override,
@@ -227,6 +273,7 @@ def recommend_autonomy(
     guardrails_passed: bool,
     requires_human_review: bool,
     is_duplicate: bool,
+    is_reopen: bool = False,
 ) -> AutonomyRecommendation:
     """Would this ticket be a straight-through candidate? (Advisory only.)
 
@@ -235,6 +282,8 @@ def recommend_autonomy(
     """
     reasons: list[str] = []
     blockers: list[str] = []
+    if is_reopen:
+        blockers.append("reopened ticket — a follow-up is handled by a human")
     category = decisions.choice("category")
     if category in AUTO_RESOLVABLE_CATEGORIES:
         reasons.append(f"category {category} is in the auto-resolvable class")
@@ -272,6 +321,7 @@ def policy_snapshot() -> dict:
     the autonomy bar. Derived from the constants above (and the
     guardrail module's) — never a second copy that could drift.
     """
+    from . import threads
     from .guardrails import (
         CATEGORY_MIN_CONFIDENCE,
         GATING_VERIFY,
@@ -321,6 +371,33 @@ def policy_snapshot() -> dict:
             "note": (
                 "deterministic clock targets per priority band (sla.py); "
                 "distinct from the model's sla_breach_risk judgement"
+            ),
+        },
+        "reopen": {
+            "limit": reopen_limit_in_force(),
+            "limit_default": REOPEN_LIMIT_DEFAULT,
+            "limit_env": "REOPEN_LIMIT",
+            "priority_floor": "one band above the band the answers earn",
+            "template_drafts": "never offered on a reopen run (code, not a prompt)",
+            "limit_behaviour": (
+                "the reopen that reaches the limit is forced to human "
+                "review by the reopen_limit guardrail check"
+            ),
+            "note": (
+                "a reopen is a new run linked to the old (the old record "
+                "is never mutated); the prior run's answers and outcome "
+                "ride as labelled history context for the decision call"
+            ),
+        },
+        "threads": {
+            "window_days": threads.THREAD_WINDOW_DAYS,
+            "overlap_threshold": threads.THREAD_OVERLAP_THRESHOLD,
+            "method": (
+                "same customer (normalised email, else name) + token "
+                "containment of subject/body tokens (shared over the "
+                "smaller set) at or over the threshold, within the "
+                "window — a label assigned at intake; grouping merges "
+                "and alters nothing"
             ),
         },
     }

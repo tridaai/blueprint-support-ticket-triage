@@ -18,7 +18,10 @@ still answer every question about the run:
 - what the guardrails said, check by check;
 - where the SLA clock stands, what the drift watch currently says
   about the questions this run used, and — when an agent recorded
-  one — the outcome that judged the run.
+  one — the outcome that judged the run;
+- for a reopen run, the chain context: which run it follows, the
+  count against the reopen limit, what the decision backend did
+  with the prior run's record, and the priority floor it applied.
 
 Everything here is composed in code from the stored record. No
 model is consulted and no prose is generated: the text rendering is
@@ -90,6 +93,7 @@ def build_export(
         "channel": record.channel,
         "received_at": record.received_at,
         "status": record.status,
+        "thread_id": record.thread_id,
     }
     if ticket_input is not None:
         intake.update(
@@ -109,6 +113,39 @@ def build_export(
     else:
         screen_note = "no injection patterns flagged; the text was still fenced as untrusted data"
 
+    reopen = None
+    if record.reopen is not None:
+        info = record.reopen
+        reopen = {
+            "prior_run_id": info.prior_run_id,
+            "root_ticket_id": info.root_ticket_id,
+            "reopen_count": info.reopen_count,
+            "reopen_limit": info.reopen_limit,
+            "limit_hit": info.limit_hit,
+            "reopened_by": info.reopened_by,
+            "reopened_at": info.reopened_at,
+            "context": {
+                "provided": info.context_provided,
+                "use": info.context_use,
+                "note": (
+                    "the prior run's answers and outcome were offered to the "
+                    "decision call as fenced history"
+                    if info.context_use == "history_block"
+                    else "the deterministic offline backend does not read "
+                    "history — its answers come from the new message alone, "
+                    "and the record says so"
+                    if info.context_use == "ignored_offline"
+                    else "no context was provided"
+                ),
+            },
+            "template_draft_suppressed": info.template_suppressed,
+            "priority_floor": {
+                "applied": composition.reopen_floor_applied,
+                "band_before": composition.band_before_floor,
+                "band_after": composition.priority_band,
+            },
+        }
+
     document = {
         "kind": "run_audit_export",
         "export_version": 1,
@@ -117,6 +154,7 @@ def build_export(
         "status": record.status,
         "external_action_taken": record.external_action_taken,
         "intake": intake,
+        "reopen": reopen,
         "injection_screen": {
             "flagged": bool(record.injection_flags),
             "flags": list(record.injection_flags),
@@ -140,6 +178,8 @@ def build_export(
             "terms_total": terms_total,
             "outage_boost_applied": composition.outage_boost_applied,
             "outage_boost_points": boost_points,
+            "reopen_floor_applied": composition.reopen_floor_applied,
+            "band_before_floor": composition.band_before_floor,
             "score_check": round(terms_total + boost_points, 1)
             == round(composition.priority_score, 1),
             "routing": {
@@ -217,6 +257,39 @@ def render_text(document: dict) -> str:
     else:
         lines.append("No injection patterns flagged.")
     lines.append(f"Note: {screen['note']}")
+    reopen = document.get("reopen")
+    if reopen:
+        ctx = reopen["context"]
+        floor = reopen["priority_floor"]
+        lines.append("")
+        lines.append("REOPEN")
+        lines.append(
+            f"Reopen #{reopen['reopen_count']} of prior run {reopen['prior_run_id']} "
+            f"(chain root {reopen['root_ticket_id']}, limit {reopen['reopen_limit']}"
+            + (", LIMIT HIT — forced to human review" if reopen["limit_hit"] else "")
+            + f"), logged by {reopen['reopened_by'] or 'agent'} at {reopen['reopened_at']}"
+        )
+        lines.append(
+            "Context: "
+            + (
+                f"prior run's record offered as fenced history ({ctx['note']})"
+                if ctx["use"] == "history_block"
+                else ctx["note"]
+            )
+        )
+        lines.append(
+            "Template draft: suppressed — a reopen never gets the canned draft"
+            if reopen["template_draft_suppressed"]
+            else "Template draft: not suppressed"
+        )
+        lines.append(
+            f"Priority floor: band {floor['band_before']} → {floor['band_after']}"
+            if floor["band_before"] != floor["band_after"]
+            else "Priority floor: applied (band already at the floor's step or above)"
+        )
+        if intake.get("thread_id"):
+            lines.append(f"Thread: {intake['thread_id']}")
+
     duplicate = document["duplicate"]
     lines.append("")
     lines.append("DUPLICATE CHECK")
@@ -273,6 +346,11 @@ def render_text(document: dict) -> str:
         lines.append(
             f"  outage boost: +{_fmt(composed['outage_boost_points'], 1)} "
             "(P(is_outage_report) ≥ 0.50)"
+        )
+    if composed.get("reopen_floor_applied"):
+        lines.append(
+            f"  reopen floor: band {composed['band_before_floor']} → "
+            f"{composed['priority_band']} (reopen runs are floored one band up)"
         )
     lines.append(
         f"  total: {_fmt(composed['terms_total'])} + {_fmt(composed['outage_boost_points'], 1)} "

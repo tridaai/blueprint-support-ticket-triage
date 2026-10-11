@@ -51,8 +51,15 @@ def build_template_draft(
     *,
     sender_name: str = "",
     is_duplicate: bool = False,
+    is_reopen: bool = False,
 ) -> DraftInfo | None:
     """A draft for the safest slice only; ``None`` everywhere else."""
+    if is_reopen:
+        # No second template, ever: a customer whose issue already
+        # failed once does not get the canned path again. Enforced
+        # here — the one place drafts are built — not by asking a
+        # model or an operator to remember.
+        return None
     if decisions.choice("category") != "how_to":
         return None
     if decisions.confidence("category") < 0.80:

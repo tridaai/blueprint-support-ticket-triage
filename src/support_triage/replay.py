@@ -184,15 +184,24 @@ def replay_policy(records: list[TicketResult], hypothetical: dict) -> dict:
             continue
         replayed += 1
         decisions = decision_set_from_record(record)
+        # A stored reopen run was composed under the reopen rules —
+        # the band floor and, at the limit, the reopen guardrail —
+        # so the replay applies the same structural facts (from the
+        # record, not the hypothetical) or every reopen in history
+        # would phantom-move under an identity replay.
         composed = comp.compose(
             decisions,
             weights=hypothetical["weights"],
             outage_boost=hypothetical["outage_boost_points"],
+            reopen=record.reopen is not None,
         )
         verdict = guard.run_guardrails(
             decisions,
             question_keys,
             category_min_confidence=hypothetical["category_min_confidence"],
+            reopen=(record.reopen.reopen_count, record.reopen.reopen_limit)
+            if record.reopen is not None
+            else None,
         )
         before = _stored_consequence(record)
         after = _consequence(

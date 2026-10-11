@@ -52,6 +52,12 @@ class CompositionInfo(BaseModel):
     contributions: dict[str, float] = Field(default_factory=dict)
     weights: dict[str, float] = Field(default_factory=dict)
     outage_boost_applied: bool = False
+    # The reopen priority floor (composition.py): on a reopen run the
+    # band is raised one step — the floor is part of composition, so
+    # it is recorded like the outage boost, with the band the answers
+    # alone would have earned kept beside it.
+    reopen_floor_applied: bool = False
+    band_before_floor: str = ""
     queue: str = "general_support"
     routing_reason: str = ""
     override: str = ""
@@ -101,6 +107,34 @@ class AgentOutcome(BaseModel):
     score_truth: dict[str, int] = Field(default_factory=dict)
 
 
+class ReopenInfo(BaseModel):
+    """This run is a reopen of an earlier run — the chain links.
+
+    A reopen is a NEW run, never an edit of the old one: the prior
+    run's record is untouched, and this block is the whole link —
+    which run it follows, where the chain started, how many reopens
+    the chain has had (this one included), the limit in force when
+    it ran and whether it hit it, and who logged the customer's
+    follow-up. ``context_use`` says, honestly, what the decision
+    backend did with the prior run's record: the LLM/Jev adapters
+    receive it as a fenced history block; the deterministic offline
+    backend ignores it by design (its answers come from the new
+    message alone), and the record says so rather than implying the
+    history was read.
+    """
+
+    prior_run_id: str = ""
+    root_ticket_id: str = ""
+    reopen_count: int = 0  # this run's position in the chain (first reopen = 1)
+    reopen_limit: int = 0  # the REOPEN_LIMIT in force when this run ran
+    limit_hit: bool = False  # reopen_count reached the limit → human review
+    reopened_by: str = ""  # the agent who logged the follow-up
+    reopened_at: str = ""  # ISO datetime, stamped by the service
+    context_provided: bool = False  # the prior run's record was offered as context
+    context_use: str = ""  # history_block | ignored_offline
+    template_suppressed: bool = True  # a reopen never gets the canned draft
+
+
 class RunTelemetry(BaseModel):
     backend: str = ""
     model: str = ""
@@ -141,6 +175,11 @@ class TicketResult(BaseModel):
     decision_by: str = ""
     decision_reason: str = ""
     outcome: Optional[AgentOutcome] = None  # agent's ground truth, once recorded
+    reopen: Optional[ReopenInfo] = None  # set when this run reopens an earlier one
+    # Conversation thread (threads.py): runs from one customer about
+    # one issue share an id — "thr-<root ticket id>". A label,
+    # assigned at intake; it merges and alters nothing.
+    thread_id: str = ""
     external_action_taken: bool = False  # invariant: always False
     trace: list[TraceStep] = Field(default_factory=list)
     telemetry: Optional[RunTelemetry] = None

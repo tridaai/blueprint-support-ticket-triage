@@ -10,7 +10,11 @@ never to the graph directly. The service:
   stored record when it is not (API restart, checkpoints off). The
   record is the source of truth either way, and the two paths produce
   the same record;
-- answers queue/metrics/record reads from the store.
+- answers queue/metrics/record reads from the store;
+- reopens a handled ticket: the customer's follow-up becomes a new,
+  linked run (the prior record is never mutated) carrying the prior
+  run's record as decision context, and assigns every fresh run its
+  conversation thread at intake (threads.py).
 """
 
 from __future__ import annotations
@@ -22,12 +26,13 @@ from datetime import datetime, timezone
 from langgraph.types import Command
 from pydantic import ValidationError
 
-from . import webhooks
+from . import threads, webhooks
+from .composition import reopen_limit_in_force
 from .events import CollectingSink, EventBus, RunEvent
 from .graph import AgentRun, build_graph
 from .ports import Checkpointer, DecisionEngine, Embedder, EventSink, ObjectStore, Store, VectorIndex
 from .schemas import AgentOutcome, TicketInput, TicketResult
-from .sla import format_timestamp
+from .sla import format_timestamp, parse_timestamp
 
 # A batch is an intake convenience, not a bulk-import channel: the
 # cap keeps one request from monopolising the service. Tickets past
@@ -118,17 +123,42 @@ class TriageService:
 
     # -- runs -------------------------------------------------------------
 
-    def run_ticket(self, ticket: TicketInput, sink: EventSink | None = None) -> AgentRun:
-        """Run one ticket to the agent gate and persist the record."""
+    def run_ticket(
+        self,
+        ticket: TicketInput,
+        sink: EventSink | None = None,
+        reopen: dict | None = None,
+    ) -> AgentRun:
+        """Run one ticket to the agent gate and persist the record.
+
+        ``reopen`` is set only by :meth:`reopen_run`: the chain
+        links, the limit in force, the prior run's record as context,
+        and the thread the new run joins by construction. A normal
+        run is assigned its conversation thread here, at intake,
+        from the stored runs (threads.py).
+        """
         sink = sink or CollectingSink()
         graph = build_graph(
             self.engine, self.embedder, self.index, self._get_checkpointer(), sink
         )
         config = {"configurable": {"thread_id": ticket.ticket_id}}
+        if reopen is not None:
+            thread_id = reopen.get("thread_id", "")
+            prior_context = reopen.get("context", "")
+        else:
+            thread_id = self._assign_thread(ticket)
+            prior_context = ""
         sink.emit(RunEvent(type="run_started", ticket_id=ticket.ticket_id))
         try:
             final = graph.invoke(
-                {"ticket": ticket.model_dump(), "started_at": time.time(), "trace": []},
+                {
+                    "ticket": ticket.model_dump(),
+                    "started_at": time.time(),
+                    "trace": [],
+                    "reopen": reopen or {},
+                    "prior_context": prior_context,
+                    "thread_id": thread_id,
+                },
                 config,
             )
         except Exception as exc:
@@ -461,6 +491,214 @@ class TriageService:
         if record is None:
             raise KeyError(f"unknown ticket {ticket_id!r}")
         return suggest_assignment(record, self.store.all_records(), load_roster())
+
+    # -- reopens + threads ---------------------------------------------------
+
+    def reopen_run(
+        self,
+        prior_ticket_id: str,
+        *,
+        message: str,
+        actor: str,
+        subject: str | None = None,
+    ) -> AgentRun:
+        """Reopen a handled ticket with the customer's follow-up.
+
+        The follow-up becomes a NEW run, linked to the old one
+        (``ReopenInfo`` on the new record); the prior record is
+        never mutated. The new run re-enters the same pipeline with
+        the code-level reopen consequences the graph applies: the
+        prior run's record offered to the decision call as
+        labelled history context, no template draft, the one-band
+        priority floor, and the reopen-limit guardrail. The sender,
+        channel and tier carry over from the prior intake; the
+        follow-up message is the new run's body, screened at intake
+        exactly like any other ticket text.
+        """
+        record = self.store.get(prior_ticket_id)
+        if record is None:
+            raise KeyError(f"unknown ticket {prior_ticket_id!r}")
+        if not (message or "").strip():
+            raise ValueError("a reopen needs the customer's follow-up message")
+        prior_input = self._stored_input(prior_ticket_id)
+        previous_count = record.reopen.reopen_count if record.reopen else 0
+        count = previous_count + 1
+        root = record.reopen.root_ticket_id if record.reopen else record.ticket_id
+        base_id = f"{root}-R{count}"
+        new_id = base_id
+        suffix = 2
+        while self.store.get(new_id) is not None:
+            # Reopening a run that already has a reopen child (a
+            # branch, not the chain's head): never overwrite the
+            # existing run — take the next free id on the same base.
+            new_id = f"{base_id}-{suffix}"
+            suffix += 1
+        now = format_timestamp(datetime.now(timezone.utc))
+        new_ticket = TicketInput(
+            ticket_id=new_id,
+            subject=subject
+            if subject is not None
+            else (prior_input.subject if prior_input is not None else record.subject),
+            body=message,
+            sender_name=(
+                prior_input.sender_name if prior_input is not None else record.sender_name
+            ),
+            sender_email=prior_input.sender_email if prior_input is not None else "",
+            channel=prior_input.channel if prior_input is not None else record.channel,
+            account_tier=prior_input.account_tier if prior_input is not None else "",
+            received_at=now,
+            previous_ticket_ids=[prior_ticket_id],
+        )
+        reopen = {
+            "prior_run_id": prior_ticket_id,
+            "root_ticket_id": root,
+            "reopen_count": count,
+            "reopen_limit": reopen_limit_in_force(),
+            "reopened_by": actor,
+            "reopened_at": now,
+            "context": self._prior_context(record),
+            "context_use": (
+                "ignored_offline"
+                if getattr(self.engine, "name", "") == "offline"
+                else "history_block"
+            ),
+            "thread_id": threads.effective_thread_id(record.thread_id, record.ticket_id),
+        }
+        return self.run_ticket(new_ticket, reopen=reopen)
+
+    @staticmethod
+    def _prior_context(record: TicketResult) -> str:
+        """The prior run's record as context text for a reopen.
+
+        Composed by code from the stored record — the answers with
+        their confidences, the routing, the agent's decision and
+        the recorded outcome. Facts only; the backends fence it as
+        historical record.
+        """
+
+        def fmt(value) -> str:
+            return f"{value:.2f}" if isinstance(value, float) else str(value)
+
+        lines = [
+            f"Prior run {record.ticket_id}: category {record.category}, "
+            f"product area {record.product_area}, routed to "
+            f"{record.composition.queue} at priority "
+            f"{record.composition.priority_band} (score {record.composition.priority_score}).",
+            "Recorded answers: "
+            + "; ".join(
+                f"{a.key}={fmt(a.value)} (confidence {a.confidence:.2f})"
+                for a in record.answers
+            )
+            + ".",
+        ]
+        if record.decision:
+            lines.append(
+                f"Agent decision on the prior run: {record.decision}"
+                + (f" by {record.decision_by}" if record.decision_by else "")
+                + "."
+            )
+        if record.outcome is not None:
+            outcome = record.outcome
+            lines.append(
+                f"Recorded outcome: final category {outcome.final_category or '—'}, "
+                f"final queue {outcome.final_queue or '—'}, "
+                f"resolved: {'yes' if outcome.resolved else 'no'}."
+            )
+            if outcome.verify_truth:
+                lines.append(
+                    "Verify truth: "
+                    + "; ".join(
+                        f"{k}={v}" for k, v in sorted(outcome.verify_truth.items())
+                    )
+                    + "."
+                )
+            if outcome.score_truth:
+                lines.append(
+                    "Score truth: "
+                    + "; ".join(
+                        f"{k}={v}" for k, v in sorted(outcome.score_truth.items())
+                    )
+                    + "."
+                )
+        else:
+            lines.append("No outcome was recorded for the prior run.")
+        return "\n".join(lines)
+
+    def _stored_input(self, ticket_id: str) -> TicketInput | None:
+        """The raw intake for a stored run: the store's copy when it
+        kept one, else the archived object-store payload, else None."""
+        stored = self.store.get_input(ticket_id)
+        if stored is not None:
+            return stored
+        try:
+            raw = self.objects.get(f"tickets/{ticket_id}.json")
+        except Exception:
+            raw = None
+        if raw:
+            try:
+                return TicketInput.model_validate(json.loads(raw))
+            except (json.JSONDecodeError, UnicodeDecodeError, ValidationError):
+                pass
+        return None
+
+    def _assign_thread(self, ticket: TicketInput) -> str:
+        """Thread assignment for a fresh run, over the stored runs."""
+        candidates = []
+        for record in self.store.all_records():
+            stored = self._stored_input(record.ticket_id)
+            candidates.append(
+                {
+                    "ticket_id": record.ticket_id,
+                    "customer": threads.customer_key(
+                        stored.sender_email if stored is not None else "",
+                        record.sender_name,
+                    ),
+                    "subject": record.subject,
+                    "body": stored.body if stored is not None else "",
+                    "received_at": parse_timestamp(record.received_at),
+                    "thread_id": record.thread_id,
+                }
+            )
+        received = parse_timestamp(ticket.received_at) or datetime.now(timezone.utc)
+        return threads.assign_thread(
+            ticket_id=ticket.ticket_id,
+            customer=threads.customer_key(ticket.sender_email, ticket.sender_name),
+            subject=ticket.subject,
+            body=ticket.body,
+            received_at=received,
+            candidates=candidates,
+        )["thread_id"]
+
+    def _thread_rows(self) -> list[dict]:
+        return [
+            threads.run_row(record, self._stored_input(record.ticket_id))
+            for record in self.store.all_records()
+        ]
+
+    def list_threads(self) -> dict:
+        """Every conversation thread over the stored runs (threads.py)."""
+        return {"threads": threads.thread_summaries(self._thread_rows())}
+
+    def get_thread(self, thread_id: str) -> dict:
+        """One thread whole: its summary state (open/reopened, latest
+        outcome) plus the runs in order, each with its outcome."""
+        rows = self._thread_rows()
+        chain = threads.thread_chain(rows, thread_id)
+        if chain["run_count"] == 0:
+            raise KeyError(f"unknown thread {thread_id!r}")
+        summary = next(
+            s for s in threads.thread_summaries(rows) if s["thread_id"] == thread_id
+        )
+        return {**summary, **chain}
+
+    def run_thread(self, ticket_id: str) -> dict:
+        """The thread a run belongs to (its chain, with outcomes)."""
+        record = self.store.get(ticket_id)
+        if record is None:
+            raise KeyError(f"unknown ticket {ticket_id!r}")
+        return self.get_thread(
+            threads.effective_thread_id(record.thread_id, record.ticket_id)
+        )
 
     # -- policy replay + audit export (reads over the records) --------------
 

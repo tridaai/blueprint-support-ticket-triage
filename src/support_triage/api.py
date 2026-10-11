@@ -36,6 +36,13 @@ every route delegates, none re-implements. Notable behaviour:
   nothing written — and ``GET /api/runs/{id}/export`` renders one
   run as a portable audit document (JSON, or plain text with
   ``?format=text``);
+- the round-6 reopen + thread layer: ``POST /api/runs/{id}/reopen``
+  turns a customer's follow-up into a NEW run linked to the old one
+  (prior record offered as decision context, no template draft, a
+  one-band priority floor, a reopen limit that forces human
+  review), and ``GET /api/threads`` / ``GET /api/threads/{id}`` /
+  ``GET /api/runs/{id}/thread`` serve the conversation threads the
+  runs were grouped into at intake (threads.py);
 - ``/readiness`` fails (503) when PostgreSQL is configured but
   unreachable, and says honestly when the in-memory test doubles are
   in use (records lost on restart — fine for a look, not for work).
@@ -684,6 +691,75 @@ def export_run(ticket_id: str, format: str = "json"):
 
         return PlainTextResponse(render_text(document))
     return document
+
+
+class ReopenRequest(BaseModel):
+    message: str  # the customer's follow-up message — the new run's body
+    actor: str = ""  # the agent logging the reopen (kept on the new record)
+    subject: str | None = None  # defaults to the prior run's subject
+
+
+@app.post("/api/runs/{ticket_id}/reopen", status_code=201)
+def reopen_run(ticket_id: str, body: ReopenRequest, request: Request):
+    """Reopen a handled ticket with the customer's follow-up message.
+
+    Creates a NEW run linked to this one — the prior record is
+    never mutated — and runs it through the same pipeline with the
+    reopen consequences applied in code (graph.py / composition.py
+    / guardrails.py): the prior run's answers and recorded outcome
+    are offered to the decision call as fenced history context, the
+    template first-response draft is suppressed, the priority band
+    is floored one step up, and a chain that reaches REOPEN_LIMIT is
+    forced to human review. The response is the new run's record.
+    """
+    require_api_key(request)
+    if not body.message.strip():
+        raise HTTPException(
+            status_code=422, detail="a reopen needs the customer's follow-up message"
+        )
+    if not body.actor.strip():
+        raise HTTPException(
+            status_code=422, detail="actor is required — who is logging this reopen"
+        )
+    try:
+        run = get_service().reopen_run(
+            ticket_id,
+            message=body.message,
+            actor=body.actor.strip(),
+            subject=body.subject,
+        )
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"unknown ticket {ticket_id!r}")
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    return run.result.model_dump()
+
+
+@app.get("/api/threads")
+def list_threads():
+    """Conversation threads over the stored runs (threads.py):
+    one entry per thread — runs in order, open/reopened state, and
+    the latest recorded outcome in the thread."""
+    return get_service().list_threads()
+
+
+@app.get("/api/threads/{thread_id}")
+def get_thread(thread_id: str):
+    """One thread's chain: every run in order, each with its outcome."""
+    try:
+        return get_service().get_thread(thread_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"unknown thread {thread_id!r}")
+
+
+@app.get("/api/runs/{ticket_id}/thread")
+def run_thread(ticket_id: str):
+    """The thread the run belongs to — the same chain as
+    ``GET /api/threads/{thread_id}``, addressed by any of its runs."""
+    try:
+        return get_service().run_thread(ticket_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"unknown ticket {ticket_id!r}")
 
 
 @app.get("/api/runs/{ticket_id}/assignment")

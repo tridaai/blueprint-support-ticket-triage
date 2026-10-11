@@ -52,11 +52,22 @@ class DecisionEngine(Protocol):
     question list, and returns a validated :class:`DecisionSet`.
     Implementations must raise ``ProviderError`` on any failure —
     never return a partial or silently-degraded answer.
+
+    ``context`` is the reopen seam: on a reopen run it carries the
+    prior run's recorded answers and outcome, as historical record.
+    Each backend declares what it does with it — the LLM and Jev
+    adapters pass it as a fenced history block, separate from the
+    new customer text; the offline heuristics ignore it (their
+    answers are a function of the ticket's own words). What a
+    backend did is recorded on the run (``ReopenInfo.context_use``);
+    no backend may silently pretend the history was read.
     """
 
     name: str
 
-    def decide(self, state: str, questions: list["Question"]) -> "DecisionSet": ...
+    def decide(
+        self, state: str, questions: list["Question"], context: str = ""
+    ) -> "DecisionSet": ...
 
 
 class Embedder(Protocol):

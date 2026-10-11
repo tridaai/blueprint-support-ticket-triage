@@ -20,6 +20,11 @@ validated decision set, and their outcomes are recorded on the run:
   recommendation and any template draft. The check itself passes —
   the flags are information, not malfunction — but a ticket carrying
   one can never be auto-anything.
+- **reopen_limit** — reopen runs only: a chain that has been
+  reopened up to its limit stops being routed by composition alone;
+  the check fails and review is forced, with the chain's count and
+  the limit named. A follow-up that keeps failing belongs to a
+  human, not to another pass of the formula.
 
 A failed guardrail does not fail the run: it marks the record, forces
 human review, and the agent decides with the failure in front of them.
@@ -73,6 +78,7 @@ def run_guardrails(
     question_keys: list[str],
     *,
     category_min_confidence: float | None = None,
+    reopen: tuple[int, int] | None = None,
 ) -> GuardrailOutcome:
     """Run every check over one decision set.
 
@@ -80,6 +86,11 @@ def run_guardrails(
     this call only (the impact replay, replay.py); the default is
     the live policy constant and every existing caller passes
     neither argument nor thought to it.
+
+    ``reopen`` is ``(reopen_count, reopen_limit)`` for a reopen run,
+    ``None`` for a first-pass run: it adds the ``reopen_limit``
+    check below. The replay passes the stored run's own pair, so a
+    limit-hit run recomposes with the same verdict it was born with.
     """
     min_confidence = (
         CATEGORY_MIN_CONFIDENCE if category_min_confidence is None else category_min_confidence
@@ -153,6 +164,27 @@ def run_guardrails(
             + " — autonomy and template draft blocked",
         )
     )
+
+    # reopen limit (reopen runs only — a first-pass run has no chain)
+    if reopen is not None:
+        reopen_count, reopen_limit = reopen
+        limit_hit = reopen_count >= reopen_limit
+        if limit_hit:
+            review_reasons.append(
+                f"reopen limit: this is reopen #{reopen_count} of its chain and the "
+                f"limit is {reopen_limit} — a human takes the follow-up from here"
+            )
+        checks.append(
+            GuardrailCheck(
+                "reopen_limit",
+                not limit_hit,
+                f"reopen #{reopen_count} of the chain reaches the reopen limit "
+                f"({reopen_limit}) — routed to human review"
+                if limit_hit
+                else f"reopen #{reopen_count} of the chain, limit {reopen_limit} — "
+                "within the normal path",
+            )
+        )
 
     return GuardrailOutcome(
         checks=checks,
