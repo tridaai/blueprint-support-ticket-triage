@@ -106,6 +106,12 @@ def _node(state: TriageState, name: str, sink: EventSink, fn) -> dict:
     trace = list(state.get("trace", []))
     trace.append(step.model_dump())
     update["trace"] = trace
+    if isinstance(update.get("result"), dict):
+        # The record carries its own trace: keep it in step with the
+        # graph state's, including the step that produced it.
+        merged = dict(update["result"])
+        merged["trace"] = trace
+        update["result"] = merged
     sink.emit(
         RunEvent(type="node_finished", ticket_id=ticket_id, node=name, duration_ms=duration_ms)
     )
