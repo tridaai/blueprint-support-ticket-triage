@@ -1,7 +1,7 @@
 {
   "backend": "offline",
-  "total": 58,
-  "passed": 58,
+  "total": 61,
+  "passed": 61,
   "score": 1.0,
   "gate": 0.95,
   "failures": {}

@@ -1,6 +1,6 @@
 """Golden routing eval: known tickets in, routing truth checked.
 
-Fifty-eight synthetic tickets with authored expectations — category,
+Sixty-one synthetic tickets with authored expectations — category,
 queue, priority band, and the five safety/engineering verify flags.
 (36 through round 2; round 3 added multi-issue tickets, three more
 injection phrasings, a calm ticket that must stay low, a repeat
@@ -20,7 +20,13 @@ review cases — a seeded world of decided runs whose stratified
 sample is asserted exactly, verdicts graded against the agreement
 report's math including the withheld rate below the verdict floor,
 and the records and calibration payload pinned byte-identical
-across grading.)
+across grading; the customer-dossier round added the dossier
+cases — a staged customer history whose history flags fire with
+exact evidence both at triage (on the new run's record) and in
+the dossier read model, a below-threshold customer with neither
+flag and the resolved rate honestly withheld, and an operator
+detach that moves the ticket between the dossier's thread rows,
+the dossier itself pinned as a pure projection.)
 Each case runs the full pipeline (screen → duplicate → one decision
 call → composition → guardrails) through a fresh service, on the
 deterministic offline backend by default, so the gate is hermetic:
@@ -617,6 +623,145 @@ def check_review_case(service: TriageService, case: dict) -> list[str]:
     return failures
 
 
+def _check_dossier_view(service: TriageService, spec: dict, label: str) -> list[str]:
+    """Judge one dossier expectation block — and pin the projection's
+    purity: the stored records are byte-identical after computing it."""
+    failures: list[str] = []
+    before = json.dumps(
+        [r.model_dump() for r in service.store.all_records()], sort_keys=True, default=str
+    )
+    view = service.customer_dossier(spec["key"])
+    after = json.dumps(
+        [r.model_dump() for r in service.store.all_records()], sort_keys=True, default=str
+    )
+    if before != after:
+        failures.append(f"{label}: computing the dossier changed the stored records")
+    for key, wanted in (spec.get("counts") or {}).items():
+        if view["counts"].get(key) != wanted:
+            failures.append(
+                f"{label}: dossier counts[{key!r}] = {view['counts'].get(key)}, "
+                f"expected {wanted}"
+            )
+    if "ticket_ids" in spec:
+        got = [row["ticket_id"] for row in view["tickets"]]
+        if got != spec["ticket_ids"]:
+            failures.append(f"{label}: dossier tickets {got}, expected {spec['ticket_ids']}")
+    flags = [
+        (f["flag"], f["category"], f["count"], f["ticket_ids"]) for f in view["flags"]
+    ]
+    wanted_flags = [
+        (f["flag"], f.get("category", ""), f["count"], f["ticket_ids"])
+        for f in spec.get("flags", [])
+    ]
+    if "flags" in spec and flags != wanted_flags:
+        failures.append(f"{label}: dossier flags {flags}, expected {wanted_flags}")
+    for key, wanted in (spec.get("outcomes") or {}).items():
+        got = view["outcomes"].get(key)
+        if got != wanted:
+            failures.append(f"{label}: dossier outcomes[{key!r}] = {got}, expected {wanted}")
+    if "threads" in spec and view["counts"]["threads"] != spec["threads"]:
+        failures.append(
+            f"{label}: dossier threads = {view['counts']['threads']}, "
+            f"expected {spec['threads']}"
+        )
+    for thread_id, members in (spec.get("thread_members") or {}).items():
+        summary = next(
+            (s for s in view["threads"] if s["thread_id"] == thread_id), None
+        )
+        if summary is None or summary["ticket_ids"] != members:
+            failures.append(
+                f"{label}: dossier thread {thread_id} holds "
+                f"{summary['ticket_ids'] if summary else None}, expected {members}"
+            )
+    for ticket_id in spec.get("corrected_tickets", []):
+        row = next((t for t in view["tickets"] if t["ticket_id"] == ticket_id), None)
+        if row is None or not (row.get("grouping") or {}).get("corrected"):
+            failures.append(
+                f"{label}: dossier row {ticket_id} does not carry the corrected grouping"
+            )
+    return failures
+
+
+def check_dossier_case(service: TriageService, case: dict) -> list[str]:
+    """A customer-dossier case (dossier.py).
+
+    Seeds a staged customer history (tickets, gate decisions,
+    recorded outcomes) and judges the dossier over it; applies any
+    operator actions; then runs the case's new ticket and judges
+    what its record carries — the history summary, the flags with
+    their exact evidence, and the composed history block, which
+    must include the declared lines and NEVER a phrase from
+    another ticket's body — and finally judges the dossier over
+    the whole record, new ticket included.
+    """
+    failures: list[str] = []
+    for entry in case.get("dossier_seed", []):
+        ticket = TicketInput.model_validate(entry["ticket"])
+        service.run_ticket(ticket)
+        if entry.get("decide", True):
+            service.record_decision(ticket.ticket_id, "approved", by="eval-agent")
+        if entry.get("outcome"):
+            _record_eval_outcome(service, ticket.ticket_id, entry["outcome"])
+    if case.get("expect_dossier_before"):
+        failures += _check_dossier_view(
+            service, case["expect_dossier_before"], "dossier before"
+        )
+    for action in case.get("operator_actions", []):
+        failures += _apply_operator_action(service, action)
+
+    new_spec = case.get("dossier_new_ticket")
+    if new_spec:
+        new_ticket = TicketInput.model_validate(new_spec)
+        # The block the run is about to be offered, composed over the
+        # same priors the run itself will see.
+        block = service._customer_history(new_ticket)["context"]
+        for phrase in case.get("history_block_includes", []):
+            if phrase not in block:
+                failures.append(f"history block does not carry {phrase!r}:\n{block}")
+        for phrase in case.get("history_block_excludes", []):
+            if phrase in block:
+                failures.append(
+                    f"history block leaks another ticket's text: {phrase!r} is in it"
+                )
+        result = service.run_ticket(new_ticket).result
+        if result.status != "awaiting_agent" or result.external_action_taken:
+            failures.append(f"run did not end clean at the gate (status {result.status})")
+        exp = case.get("expect_history") or {}
+        history = result.history
+        for key in (
+            "context_provided",
+            "context_use",
+            "prior_tickets",
+            "decided",
+            "reopened",
+            "outcomes_recorded",
+            "last_outcome_ticket_id",
+        ):
+            if key in exp and getattr(history, key) != exp[key]:
+                failures.append(
+                    f"history {key} = {getattr(history, key)}, expected {exp[key]}"
+                )
+        if "resolved_rate" in exp and history.resolved_rate != exp["resolved_rate"]:
+            failures.append(
+                f"history resolved_rate = {history.resolved_rate}, "
+                f"expected {exp['resolved_rate']} (None = honestly withheld)"
+            )
+        got_flags = [
+            (f.flag, f.category, f.count, f.ticket_ids) for f in history.flags
+        ]
+        wanted_flags = [
+            (f["flag"], f.get("category", ""), f["count"], f["ticket_ids"])
+            for f in exp.get("flags", [])
+        ]
+        if "flags" in exp and got_flags != wanted_flags:
+            failures.append(f"history flags {got_flags}, expected {wanted_flags}")
+    # The dossier expectation describes the customer's whole record
+    # as it stands at the end of the case — new ticket included.
+    if case.get("expect_dossier"):
+        failures += _check_dossier_view(service, case["expect_dossier"], "dossier")
+    return failures
+
+
 def main() -> int:
     cases = load_cases()
     service = fresh_service()
@@ -627,6 +772,8 @@ def main() -> int:
         # only a case's own `previous` ticket may link to it.
         if "qa_sample" in case:
             failures = check_review_case(fresh_service(), case)
+        elif "dossier_seed" in case or "dossier_new_ticket" in case:
+            failures = check_dossier_case(fresh_service(), case)
         elif "operator_actions" in case:
             failures = check_operator_case(fresh_service(), case)
         elif "neighbours" in case or "workbench_actions" in case:

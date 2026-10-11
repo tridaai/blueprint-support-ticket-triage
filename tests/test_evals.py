@@ -23,11 +23,13 @@ def _load(name: str):
 def test_golden_cases_all_pass_the_pipeline_checks():
     runner = _load("run_evals")
     cases = runner.load_cases()
-    assert len(cases) == 58
+    assert len(cases) == 61
     failures = {}
     for case in cases:
         if "qa_sample" in case:
             case_failures = runner.check_review_case(runner.fresh_service(), case)
+        elif "dossier_seed" in case or "dossier_new_ticket" in case:
+            case_failures = runner.check_dossier_case(runner.fresh_service(), case)
         elif "operator_actions" in case:
             case_failures = runner.check_operator_case(runner.fresh_service(), case)
         elif "neighbours" in case or "workbench_actions" in case:

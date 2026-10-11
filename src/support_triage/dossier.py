@@ -359,12 +359,12 @@ def build_dossier(
         if inputs.get(record.ticket_id) is not None:
             latest_input = inputs[record.ticket_id]
             break
-    email = ""
-    tier = ""
-    if latest_input is not None:
-        email = latest_input.sender_email
-        tier = latest_input.account_tier
+    tier = latest_input.account_tier if latest_input is not None else ""
     kind = identity_kind(customer_key)
+    # The address the dossier is keyed by is the NORMALISED one —
+    # the raw intake string (case, stray spaces and all) is not the
+    # identity the history was grouped under.
+    email = customer_key if kind == "email" else ""
     return {
         "customer_key": customer_key,
         "identity": {
