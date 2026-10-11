@@ -385,6 +385,57 @@ grouping uses, so a correction can never join what the machine was
 forbidden to). Unknown runs and threads stay `KeyError` → 404, the
 house style.
 
+## The agent's workbench
+
+`workbench.py` + `playbooks.py` are the post-gate layer: everything
+they do happens after triage, to a record the pipeline has finished
+with, and none of it feeds back. The separation is structural, not
+promissory — the golden pack pins the run's status, composition,
+answers, and calibration samples byte-identical across workbench
+actions, and `livecal.live_samples` reads outcomes and answers only,
+so workbench state cannot enter a sample by construction.
+
+**Resolution knowledge** is a join, not a new model: the
+similar-tickets machinery (same embedder, same index, same floor)
+produces the neighbour list exactly as before, and the workbench
+joins it to stored outcomes in code. The honesty rules are the
+drift watch's, applied to advice: an aggregate over fewer than
+`KNOWLEDGE_MIN_SAMPLES` (3) outcome-bearing neighbours withholds
+its rate and median rather than quoting them; neighbours without
+outcomes are counted as excluded in the payload's accounting, so
+the reader can see the shape of what was left out. Time-to-
+resolution deserves its sentence: outcomes carry no duration
+field, so the figure is elapsed hours between the two stamps the
+records do carry — intake (`received_at`) and outcome
+(`recorded_at`, stamped when the agent closes the ticket out) —
+computed in `hours_from_intake` and named exactly that on every
+surface. A record missing either stamp yields `None`, never a
+reconstruction.
+
+**Playbooks** are authored data (`data/playbooks.json`, validated
+at load against the decision port's category set, the roster
+pattern). Progress is an append-only overlay on the record
+(`playbook_checks`, `playbook_na`) with the corrections'
+semantics: the effective state is the last entry, the trail is
+never rewritten, mutations demand an actor (and a reason for the
+not-applicable mark), and conflicts are 409s. The one hard rule
+beyond bookkeeping: a set marked not-applicable refuses step
+checks until the mark is lifted — the mark exists to stop
+box-ticking, so working the steps underneath it is a conflict,
+not a shortcut.
+
+**The working note** is composed in `build_working_note` from the
+record alone — routing reason verbatim (pinned by golden case
+G55), raised verify answers mapped to code-authored "blocked on"
+lines, duplicate/thread context read through `corrections`, and
+the deterministic SLA clock. Determinism is the point: the draft
+is stable under the agent while they edit it, and the saved note
+is a separate stored object (`working_note` on the record) that
+no read recomputes. It is deliberately a different surface from
+the template first-response draft — internal vs customer-facing,
+saved-under-a-name vs offered-for-one-slice — and the export
+carries them as separate blocks so an audit never confuses them.
+
 ## Events, comparisons, and SLA clocks
 
 **The event bus** (`events.py: EventBus`, owned by the service) is

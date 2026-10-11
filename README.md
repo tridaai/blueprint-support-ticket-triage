@@ -108,7 +108,7 @@ Or natively, offline, in about a minute:
 uv sync --extra dev        # or, without uv: make install-pip
 make demo                  # one ticket, traced end to end
 make test                  # 241 tests
-make evals                 # golden routing 51/51 · calibration gates pass
+make evals                 # golden routing 55/55 · calibration gates pass
 make serve                 # API + console on :8000
 ```
 
@@ -154,15 +154,17 @@ exists for tests and offline demos only. A deployment always sets
 
 Two packs, both deterministic offline:
 
-- **Golden routing set** (`evals/run_evals.py`) — 51 synthetic tickets
+- **Golden routing set** (`evals/run_evals.py`) — 55 synthetic tickets
   with authored category, queue, priority band, and safety flags —
   including the reopen cases (a reopened how_to that must not get a
   template draft, a floor-raised band, a chain that hits the reopen
-  limit), a thread near-miss that must stay separate, and the
+  limit), a thread near-miss that must stay separate, the
   operator-correction cases (a computed thread pair an operator
   splits, a confirmed duplicate entering the calibration accounting,
-  and the correction refusals).
-  Gate: ≥ 95%. Current: **51/51**.
+  and the correction refusals), and the workbench cases (resolution
+  knowledge over seeded neighbours, the small-sample withholding,
+  playbook actions and refusals, the note draft).
+  Gate: ≥ 95%. Current: **55/55**.
 - **Calibration pack** (`evals/run_calibration.py`) — the headline
   eval for a decision system: reliability bins and Brier scores per
   question against the golden truths. Verify Briers ≤ 0.013, category
@@ -397,6 +399,50 @@ honest and the human accountable:
   the correction controls on the Threads view and the mark/unmark
   form on the decision record.
 
+## The agent's workbench
+
+Triage ends at `AWAITING_AGENT` — and the record keeps helping the
+human who picks the ticket up (`GET /api/runs/{id}/workbench`, with
+`/knowledge`, `/playbook`, and `/note` parts; the console shows all
+three on the record):
+
+- **Resolution knowledge.** The similar-tickets list, joined to the
+  outcomes in code: how tickets like this one actually ended — each
+  neighbour's resolution as recorded (an outcome can now carry the
+  agent's own `resolution_summary`), plus an aggregate over the set:
+  how many resolved, and the median intake-to-outcome time computed
+  from the two recorded stamps. Similar runs *without* an outcome
+  never enter the figures; the accounting names how many were left
+  out and why. Below three outcome-bearing neighbours the rate and
+  median are withheld with a note saying so — two resolved tickets
+  are an anecdote, not a rate.
+- **Category playbooks.** Authored handling steps per category
+  (`data/playbooks.json`, loaded and validated like the roster;
+  billing, technical issue, account access, and how-to ship
+  authored). The agent checks steps off as they work, and can mark
+  the set not-applicable with a reason — an append-only overlay on
+  the record, in the corrections style. Steps are guidance:
+  nothing executes them, nothing blocks on them, an unchecked
+  playbook changes nothing about the run, and a category with no
+  authored playbook says so plainly instead of dressing up a
+  generic list.
+- **The working note.** An internal draft composed deterministically
+  from the record — the composition's own routing reason verbatim,
+  the raised verify answers as what the customer is blocked on,
+  duplicate and thread context, the SLA clock state — labelled
+  INTERNAL DRAFT. The agent edits it and saves it back under their
+  name (`POST /api/runs/{id}/workbench/note`). It is a different
+  surface from the customer template draft, with a different name,
+  and it is never sent anywhere.
+
+Playbook progress and the saved note ride the audit export as their
+own blocks. None of the workbench touches the decision: status,
+composition, answers, and the calibration samples are byte-identical
+before and after any workbench action, and the golden pack pins
+exactly that (cases G52–G55: the knowledge math and exclusion, the
+small-sample withholding, the playbook actions and their refusals,
+the note draft carrying the routing reason verbatim).
+
 ## Batch, compare, similar tickets, SLA clocks, events, webhooks
 
 The operations surface around the pipeline:
@@ -496,6 +542,8 @@ src/support_triage/
   exports.py      one run as a portable audit document (JSON + text)
   threads.py      conversation threads: deterministic grouping, labels only
   corrections.py  operator overlay: thread corrections + confirmed duplicates
+  playbooks.py    authored category playbooks + the check-off overlay reads
+  workbench.py    resolution knowledge, the working-note composer, refusals
   compare.py      one ticket under several backends, diffed, unqueued
   sla.py          the deterministic SLA clock (band targets vs age)
   events.py       run events + the lifecycle bus behind /api/events
