@@ -102,6 +102,16 @@ class Store(Protocol):
 
     def all_errors(self) -> list[dict]: ...
 
+    # QA review records (reviews.py): samples and verdicts are
+    # stored beside the run records, never inside them.
+    def save_review_sample(self, sample: Any) -> None: ...
+
+    def all_review_samples(self) -> list: ...
+
+    def save_review_verdict(self, verdict: Any) -> None: ...
+
+    def all_review_verdicts(self) -> list: ...
+
 
 class ObjectStore(Protocol):
     """The document seam: raw ticket payloads live behind object keys,

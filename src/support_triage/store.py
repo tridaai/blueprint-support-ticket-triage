@@ -63,6 +63,34 @@ class StoreBase:
     def all_errors(self) -> list[dict]:
         return [dict(e) for e in self.__dict__.get("_error_log", [])]
 
+    # -- QA review records (reviews.py) -----------------------------------
+    # Samples and verdicts are stored records of their own — never
+    # part of a run's record (a graded triage stays byte-identical).
+    # Same arrangement as the error log: a process-local default
+    # (right for the test doubles), PostgresStore persists them in
+    # the review tables (migration 0004).
+
+    def save_review_sample(self, sample) -> None:
+        log = self.__dict__.setdefault("_review_samples", {})
+        log[sample.sample_id] = sample.model_copy(deep=True)
+
+    def all_review_samples(self) -> list:
+        return [
+            sample.model_copy(deep=True)
+            for sample in self.__dict__.get("_review_samples", {}).values()
+        ]
+
+    def save_review_verdict(self, verdict) -> None:
+        self.__dict__.setdefault("_review_verdicts", []).append(
+            verdict.model_copy(deep=True)
+        )
+
+    def all_review_verdicts(self) -> list:
+        return [
+            verdict.model_copy(deep=True)
+            for verdict in self.__dict__.get("_review_verdicts", [])
+        ]
+
     def queue_summary(
         self, filters: dict | None = None, now: datetime | None = None
     ) -> list[dict]:
@@ -287,6 +315,56 @@ class PostgresStore(StoreBase):
             }
             for row in rows
         ]
+
+    # -- QA review records: persisted in their own tables (0004) ----------
+
+    def save_review_sample(self, sample) -> None:
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO review_samples (sample_id, payload)
+                    VALUES (%s, %s::jsonb)
+                    ON CONFLICT (sample_id) DO UPDATE SET payload = EXCLUDED.payload
+                    """,
+                    (sample.sample_id, json.dumps(sample.model_dump())),
+                )
+            conn.commit()
+
+    def all_review_samples(self) -> list:
+        from .schemas import ReviewSample
+
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT payload FROM review_samples ORDER BY sample_id")
+                rows = cur.fetchall()
+        return [ReviewSample.model_validate(row[0]) for row in rows]
+
+    def save_review_verdict(self, verdict) -> None:
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO review_verdicts (sample_id, ticket_id, reviewer, payload)
+                    VALUES (%s, %s, %s, %s::jsonb)
+                    """,
+                    (
+                        verdict.sample_id,
+                        verdict.ticket_id,
+                        verdict.reviewer,
+                        json.dumps(verdict.model_dump()),
+                    ),
+                )
+            conn.commit()
+
+    def all_review_verdicts(self) -> list:
+        from .schemas import ReviewVerdict
+
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT payload FROM review_verdicts ORDER BY id")
+                rows = cur.fetchall()
+        return [ReviewVerdict.model_validate(row[0]) for row in rows]
 
     def get(self, ticket_id: str) -> TicketResult | None:
         with self._connect() as conn:

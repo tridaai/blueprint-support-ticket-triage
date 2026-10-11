@@ -30,7 +30,11 @@ still answer every question about the run:
 - the agent's workbench state (workbench.py): the category
   playbook's progress (steps ticked, by whom, or the set marked
   not-applicable and why) and the saved internal working note —
-  the agent's handwriting on the file, exported as such.
+  the agent's handwriting on the file, exported as such;
+- the QA review verdicts (reviews.py), when a reviewer graded this
+  run in a sampled round: per-family agreement, the overall
+  verdict, and the note — the humans' grading of the triage,
+  carried beside the outcome's grading of the result.
 
 Everything here is composed in code from the stored record. No
 model is consulted and no prose is generated: the text rendering is
@@ -79,6 +83,7 @@ def build_export(
     ticket_input=None,
     sla: dict | None = None,
     drift: dict | None = None,
+    review: dict | None = None,
 ) -> dict:
     """Assemble the audit document for one stored run (pure)."""
     composition = record.composition
@@ -246,6 +251,12 @@ def build_export(
         "working_note": (
             record.working_note.model_dump() if record.working_note is not None else None
         ),
+        # QA review (reviews.py): the verdicts reviewers recorded on
+        # this run, when it was drawn in a sample and graded. The
+        # verdicts live on the review record, not on the run — the
+        # service looks them up and hands them in, exactly like the
+        # drift context above; ``None`` means never reviewed.
+        "qa_review": review,
         "draft": record.draft.model_dump() if record.draft is not None else None,
         "telemetry": record.telemetry.model_dump() if record.telemetry is not None else None,
         "trace": [step.model_dump() for step in record.trace],
@@ -548,6 +559,26 @@ def render_text(document: dict) -> str:
             f"at {note['saved_at']} — internal, never sent)"
         )
         lines.append(note["text"])
+
+    qa_review = document.get("qa_review")
+    if qa_review:
+        lines.append("")
+        lines.append("QA REVIEW (human grading of this triage — reviews.py)")
+        for verdict in qa_review["verdicts"]:
+            families = " · ".join(
+                f"{family}={grade}"
+                for family, grade in verdict["families"].items()
+            )
+            lines.append(
+                f"{verdict['reviewer']} in sample {verdict['sample_id']}: "
+                f"overall {verdict['overall']} — {families}"
+            )
+            if verdict["note"]:
+                lines.append(f"  note: {verdict['note']}")
+        lines.append(
+            "The verdicts live on the review record; grading changed "
+            "nothing on this run."
+        )
 
     if document["draft"]:
         lines.append("")

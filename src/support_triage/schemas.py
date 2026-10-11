@@ -243,6 +243,58 @@ class WorkingNote(BaseModel):
     saved_at: str = ""  # ISO datetime, stamped by the service
 
 
+class ReviewSample(BaseModel):
+    """One QA review round: a seeded, stratified draw over decided runs.
+
+    Calibration (livecal.py) measures outcomes — did the ticket
+    resolve. QA review measures the DECISIONS: were the answers and
+    the routing right, as judged by a human reviewer who was not
+    handed a cherry-picked pile. The draw is made by
+    :mod:`reviews` — stratified by queue and priority band, seeded,
+    and reproducible — and the sample is a stored record in its own
+    right (seed, strata counts, run ids, exclusions with names), so
+    a review round can be audited and re-run exactly. A sample is
+    NOT part of any run's record: reviewing never edits a triage.
+    """
+
+    sample_id: str
+    seed: int = 0
+    size_requested: int = 0
+    created_by: str = ""
+    created_at: str = ""  # ISO datetime, stamped by the service
+    exclude_previously_reviewed: bool = True
+    # The population the draw was made over, accounted in full:
+    # decided runs in the store, the confirmed duplicates excluded
+    # (named), the previously-reviewed runs excluded (named, when
+    # the flag was on), and what was left eligible.
+    population: dict = Field(default_factory=dict)
+    # One row per (queue, band) stratum: eligible vs sampled counts.
+    strata: list[dict] = Field(default_factory=list)
+    run_ids: list[str] = Field(default_factory=list)  # the draw, in draw order
+    note: str = ""
+
+
+class ReviewVerdict(BaseModel):
+    """One reviewer's judgement of one sampled run.
+
+    Append-only on the review record (reviews.py): a reviewer
+    grades the run's triage per question family (agree / disagree)
+    plus an overall verdict and a free-text note. Verdicts live
+    with the sample, never on the run's own record — the triage a
+    reviewer graded stays byte-identical under the grading. One
+    verdict per (sample, run, reviewer): a second by the same
+    reviewer is a conflict, not an edit.
+    """
+
+    sample_id: str = ""
+    ticket_id: str = ""
+    reviewer: str = ""
+    families: dict[str, str] = Field(default_factory=dict)  # family -> agree | disagree
+    overall: str = ""  # agree | disagree
+    note: str = ""
+    recorded_at: str = ""  # ISO datetime, stamped by the service
+
+
 class RunTelemetry(BaseModel):
     backend: str = ""
     model: str = ""

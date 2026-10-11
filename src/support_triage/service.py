@@ -18,7 +18,12 @@ never to the graph directly. The service:
 - records operator corrections (corrections.py): thread attach /
   detach / merge and confirmed-duplicate marks — append-only
   overlays on the records that change where a run sits (and whether
-  it counts as a calibration sample), never what was decided on it.
+  it counts as a calibration sample), never what was decided on it;
+- runs QA review (reviews.py): draws the seeded, stratified sample
+  over decided runs, stores reviewers' per-family verdicts on the
+  review record (never on the run's record), and serves the
+  agreement report — the layer that grades the triage itself, where
+  calibration only ever graded outcomes.
 """
 
 from __future__ import annotations
@@ -35,7 +40,15 @@ from .composition import reopen_limit_in_force
 from .events import CollectingSink, EventBus, RunEvent
 from .graph import AgentRun, build_graph
 from .ports import Checkpointer, DecisionEngine, Embedder, EventSink, ObjectStore, Store, VectorIndex
-from .schemas import AgentOutcome, DuplicateMark, ThreadCorrection, TicketInput, TicketResult
+from .schemas import (
+    AgentOutcome,
+    DuplicateMark,
+    ReviewSample,
+    ReviewVerdict,
+    ThreadCorrection,
+    TicketInput,
+    TicketResult,
+)
 from .sla import format_timestamp, parse_timestamp
 
 # A batch is an intake convenience, not a bulk-import channel: the
@@ -1157,6 +1170,194 @@ class TriageService:
         self.store.save(record)
         return record
 
+    # -- QA review (samples, verdicts, agreement report) -------------------
+
+    def create_review_sample(
+        self,
+        *,
+        size: int,
+        seed: int = 0,
+        created_by: str = "",
+        exclude_previously_reviewed: bool = True,
+    ) -> ReviewSample:
+        """Draw a QA review sample over the decided runs (reviews.py).
+
+        Stratified by queue and priority band, seeded, reproducible;
+        confirmed duplicates never draw, and previously-reviewed
+        runs sit out unless the caller switches the exclusion off.
+        The sample is stored as its own record — the draw, its
+        strata, and every exclusion by name — so the round can be
+        audited and re-run exactly. No run record is touched.
+        """
+        from . import reviews
+
+        created_by = (created_by or "").strip()
+        if not created_by:
+            raise reviews.ReviewError(
+                "created_by is required — a sample names who drew it"
+            )
+        if not isinstance(size, int) or isinstance(size, bool) or size < 1:
+            raise reviews.ReviewError(
+                f"sample size must be a positive integer, got {size!r}"
+            )
+        records = self.store.all_records()
+        run_ids, population, strata = reviews.draw_sample(
+            records,
+            self.store.all_review_verdicts(),
+            size=size,
+            seed=int(seed),
+            exclude_previously_reviewed=bool(exclude_previously_reviewed),
+        )
+        if not run_ids:
+            raise reviews.ReviewError(
+                "no eligible runs to sample — the population is decided runs "
+                "that are not confirmed duplicates"
+                + (
+                    " or previously reviewed"
+                    if exclude_previously_reviewed
+                    else ""
+                )
+                + f" (decided total: {population['decided_total']})"
+            )
+        existing = self.store.all_review_samples()
+        sample_id = f"QAS-{len(existing) + 1:04d}"
+        note = (
+            f"drew {len(run_ids)} of {population['eligible']} eligible decided "
+            f"runs (requested {size})"
+        )
+        if len(run_ids) < size:
+            note += " — the request ran past the eligible population, so the sample is the population"
+        sample = ReviewSample(
+            sample_id=sample_id,
+            seed=int(seed),
+            size_requested=size,
+            created_by=created_by,
+            created_at=format_timestamp(datetime.now(timezone.utc)),
+            exclude_previously_reviewed=bool(exclude_previously_reviewed),
+            population=population,
+            strata=strata,
+            run_ids=run_ids,
+            note=note,
+        )
+        self.store.save_review_sample(sample)
+        self._publish(
+            "review_sample_created",
+            "",
+            {"sample_id": sample_id, "runs": len(run_ids), "seed": sample.seed},
+        )
+        return sample
+
+    def list_review_samples(self) -> list[ReviewSample]:
+        return self.store.all_review_samples()
+
+    def get_review_sample(self, sample_id: str) -> dict:
+        """One sample with the verdicts recorded against it so far."""
+        sample = self._review_sample_or_raise(sample_id)
+        verdicts = [
+            verdict.model_dump()
+            for verdict in self.store.all_review_verdicts()
+            if verdict.sample_id == sample_id
+        ]
+        return {
+            "sample": sample.model_dump(),
+            "verdicts": verdicts,
+            "verdicted_runs": len({v["ticket_id"] for v in verdicts}),
+        }
+
+    def _review_sample_or_raise(self, sample_id: str) -> ReviewSample:
+        for sample in self.store.all_review_samples():
+            if sample.sample_id == sample_id:
+                return sample
+        raise KeyError(f"unknown review sample {sample_id!r}")
+
+    def record_review_verdict(
+        self,
+        sample_id: str,
+        *,
+        ticket_id: str,
+        reviewer: str,
+        families: dict,
+        overall: str,
+        note: str = "",
+    ) -> ReviewVerdict:
+        """Record one reviewer's grading of one sampled run.
+
+        The verdict lives on the review record tied to the sample;
+        the run's triage record is never opened for writing here —
+        grading changes nothing about what was decided (the suite
+        pins the record, the calibration samples, and the live
+        calibration payload byte-identical across a verdict).
+        """
+        from . import reviews
+
+        reviewer = (reviewer or "").strip()
+        if not reviewer:
+            raise reviews.ReviewError(
+                "reviewer is required — a verdict names who graded it"
+            )
+        sample = self._review_sample_or_raise(sample_id)
+        if ticket_id not in sample.run_ids:
+            raise reviews.ReviewError(
+                f"run {ticket_id!r} is not in sample {sample_id} — a verdict "
+                "grades a run the sample drew, never one it did not"
+            )
+        cleaned = reviews.validate_verdict_families(families)
+        overall_clean = reviews.validate_overall(overall)
+        for existing in self.store.all_review_verdicts():
+            if (
+                existing.sample_id == sample_id
+                and existing.ticket_id == ticket_id
+                and existing.reviewer == reviewer
+            ):
+                raise reviews.ReviewConflict(
+                    f"{reviewer} already graded run {ticket_id} in sample "
+                    f"{sample_id} (overall: {existing.overall}) — a verdict "
+                    "is final; another reviewer may still grade the run"
+                )
+        verdict = ReviewVerdict(
+            sample_id=sample_id,
+            ticket_id=ticket_id,
+            reviewer=reviewer,
+            families=cleaned,
+            overall=overall_clean,
+            note=(note or "").strip(),
+            recorded_at=format_timestamp(datetime.now(timezone.utc)),
+        )
+        self.store.save_review_verdict(verdict)
+        self._publish(
+            "review_verdict_recorded",
+            ticket_id,
+            {"sample_id": sample_id, "reviewer": reviewer, "overall": overall_clean},
+        )
+        return verdict
+
+    def review_report(self, sample_ids: list[str] | None = None) -> dict:
+        """The agreement report over one sample, a set, or all of
+        them (reviews.py) — a read model; it recomputes nothing
+        about any run and changes nothing anywhere."""
+        from . import reviews
+
+        all_samples = self.store.all_review_samples()
+        if sample_ids:
+            wanted = set(sample_ids)
+            samples = [s for s in all_samples if s.sample_id in wanted]
+            missing = wanted - {s.sample_id for s in samples}
+            if missing:
+                raise KeyError(f"unknown review sample(s) {sorted(missing)}")
+        else:
+            samples = all_samples
+        records = {r.ticket_id: r for r in self.store.all_records()}
+        return reviews.agreement_report(
+            samples, self.store.all_review_verdicts(), records
+        )
+
+    def review_entries_for(self, ticket_id: str) -> list[dict]:
+        """Every verdict recorded on one run, across all samples —
+        the audit export's review block for the run."""
+        from . import reviews
+
+        return reviews.review_entries_for(ticket_id, self.store.all_review_verdicts())
+
     # -- policy replay + audit export (reads over the records) --------------
 
     def policy_replay(
@@ -1211,12 +1412,14 @@ class TriageService:
             "flagged_questions": flagged,
             "questions": questions,
         }
+        entries = self.review_entries_for(ticket_id)
         return build_export(
             record,
             exported_at=format_timestamp(datetime.now(timezone.utc)),
             ticket_input=self.store.get_input(ticket_id),
             sla=sla_clock(record),
             drift=drift,
+            review={"verdicts": entries} if entries else None,
         )
 
     # -- reads --------------------------------------------------------------
