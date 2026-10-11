@@ -1,24 +1,24 @@
 {
-  "cases": 48,
-  "overall_brier": 0.306,
-  "worst_bin_gap": 0.2476,
+  "cases": 51,
+  "overall_brier": 0.2998,
+  "worst_bin_gap": 0.2432,
   "worst_bin": {
     "question": "category",
     "bin": "0.7-0.8",
-    "n": 8,
-    "mean_predicted": 0.7524,
+    "n": 9,
+    "mean_predicted": 0.7568,
     "empirical": 1.0,
-    "gap": 0.2476
+    "gap": 0.2432
   },
   "per_question": {
     "contains_pii": {
       "kind": "verify",
-      "n": 48,
+      "n": 51,
       "brier": 0.0017,
       "bins": [
         {
           "bin": "0.0-0.1",
-          "n": 46,
+          "n": 49,
           "mean_predicted": 0.04,
           "empirical": 0.0,
           "gap": 0.04
@@ -90,12 +90,12 @@
     },
     "is_abusive": {
       "kind": "verify",
-      "n": 48,
-      "brier": 0.0043,
+      "n": 51,
+      "brier": 0.0041,
       "bins": [
         {
           "bin": "0.0-0.1",
-          "n": 45,
+          "n": 48,
           "mean_predicted": 0.03,
           "empirical": 0.0,
           "gap": 0.03
@@ -167,12 +167,12 @@
     },
     "is_outage_report": {
       "kind": "verify",
-      "n": 48,
+      "n": 51,
       "brier": 0.0021,
       "bins": [
         {
           "bin": "0.0-0.1",
-          "n": 45,
+          "n": 48,
           "mean_predicted": 0.04,
           "empirical": 0.0,
           "gap": 0.04
@@ -244,12 +244,12 @@
     },
     "mentions_legal": {
       "kind": "verify",
-      "n": 48,
-      "brier": 0.0017,
+      "n": 51,
+      "brier": 0.0016,
       "bins": [
         {
           "bin": "0.0-0.1",
-          "n": 44,
+          "n": 47,
           "mean_predicted": 0.03,
           "empirical": 0.0,
           "gap": 0.03
@@ -321,12 +321,12 @@
     },
     "needs_engineering": {
       "kind": "verify",
-      "n": 48,
-      "brier": 0.0131,
+      "n": 51,
+      "brier": 0.0127,
       "bins": [
         {
           "bin": "0.0-0.1",
-          "n": 43,
+          "n": 46,
           "mean_predicted": 0.08,
           "empirical": 0.0,
           "gap": 0.08
@@ -398,8 +398,8 @@
     },
     "category": {
       "kind": "choice",
-      "n": 48,
-      "brier": 0.0967,
+      "n": 51,
+      "brier": 0.0922,
       "bins": [
         {
           "bin": "0.0-0.1",
@@ -452,10 +452,10 @@
         },
         {
           "bin": "0.7-0.8",
-          "n": 8,
-          "mean_predicted": 0.7524,
+          "n": 9,
+          "mean_predicted": 0.7568,
           "empirical": 1.0,
-          "gap": 0.2476
+          "gap": 0.2432
         },
         {
           "bin": "0.8-0.9",
@@ -466,23 +466,23 @@
         },
         {
           "bin": "0.9-1.0",
-          "n": 5,
-          "mean_predicted": 0.9309,
+          "n": 7,
+          "mean_predicted": 0.9295,
           "empirical": 1.0,
-          "gap": 0.0691
+          "gap": 0.0705
         }
       ]
     },
     "churn_risk": {
       "kind": "score",
-      "n": 48,
-      "brier": 0.7416,
+      "n": 51,
+      "brier": 0.7305,
       "high_event_brier": 0.0,
-      "mae": 1.0455,
+      "mae": 1.012,
       "bins": [
         {
           "bin": "0.0-0.1",
-          "n": 47,
+          "n": 50,
           "mean_predicted": 0.0,
           "empirical": 0.0,
           "gap": 0.0
@@ -554,21 +554,21 @@
     },
     "sentiment": {
       "kind": "score",
-      "n": 48,
-      "brier": 0.7281,
-      "high_event_brier": 0.0165,
-      "mae": 0.7625,
+      "n": 51,
+      "brier": 0.7094,
+      "high_event_brier": 0.017,
+      "mae": 0.7255,
       "bins": [
         {
           "bin": "0.0-0.1",
-          "n": 39,
+          "n": 40,
           "mean_predicted": 0.0281,
           "empirical": 0.0,
           "gap": 0.0281
         },
         {
           "bin": "0.1-0.2",
-          "n": 7,
+          "n": 9,
           "mean_predicted": 0.1901,
           "empirical": 0.0,
           "gap": 0.1901
@@ -633,17 +633,17 @@
     },
     "sla_breach_risk": {
       "kind": "score",
-      "n": 48,
-      "brier": 0.789,
-      "high_event_brier": 0.0068,
-      "mae": 0.9738,
+      "n": 51,
+      "brier": 0.7765,
+      "high_event_brier": 0.0064,
+      "mae": 0.9458,
       "bins": [
         {
           "bin": "0.0-0.1",
-          "n": 44,
-          "mean_predicted": 0.0023,
+          "n": 47,
+          "mean_predicted": 0.0022,
           "empirical": 0.0,
-          "gap": 0.0023
+          "gap": 0.0022
         },
         {
           "bin": "0.1-0.2",
@@ -712,17 +712,17 @@
     },
     "urgency": {
       "kind": "score",
-      "n": 48,
-      "brier": 0.6818,
-      "high_event_brier": 0.002,
-      "mae": 0.6524,
+      "n": 51,
+      "brier": 0.6668,
+      "high_event_brier": 0.0019,
+      "mae": 0.6141,
       "bins": [
         {
           "bin": "0.0-0.1",
-          "n": 42,
-          "mean_predicted": 0.004,
+          "n": 45,
+          "mean_predicted": 0.0037,
           "empirical": 0.0,
-          "gap": 0.004
+          "gap": 0.0037
         },
         {
           "bin": "0.1-0.2",

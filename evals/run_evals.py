@@ -1,6 +1,6 @@
 """Golden routing eval: known tickets in, routing truth checked.
 
-Forty-eight synthetic tickets with authored expectations — category,
+Fifty-one synthetic tickets with authored expectations — category,
 queue, priority band, and the five safety/engineering verify flags.
 (36 through round 2; round 3 added multi-issue tickets, three more
 injection phrasings, a calm ticket that must stay low, a repeat
@@ -8,7 +8,10 @@ outage follow-up, and an abuse-plus-legal combination; round 6 added
 the reopen cases — a reopened how_to that must not get a template
 draft, a reopen whose band rises by the priority floor, a chain
 that hits the reopen limit and goes to human review — and a thread
-near-miss that must stay in its own thread.)
+near-miss that must stay in its own thread; the operator-correction
+round added the correction cases — a computed thread pair an
+operator splits, a duplicate an operator confirms into the
+calibration accounting, and the correction refusals.)
 Each case runs the full pipeline (screen → duplicate → one decision
 call → composition → guardrails) through a fresh service, on the
 deterministic offline backend by default, so the gate is hermetic:
@@ -29,11 +32,14 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
+from support_triage import corrections  # noqa: E402
 from support_triage.backends import OfflineDecisionEngine  # noqa: E402
 from support_triage.embeddings import HashingEmbedder, InMemoryVectorIndex  # noqa: E402
+from support_triage.livecal import live_calibration  # noqa: E402
 from support_triage.objectstore import InMemoryObjectStore  # noqa: E402
 from support_triage.schemas import AgentOutcome, TicketInput  # noqa: E402
 from support_triage.service import TriageService  # noqa: E402
+from support_triage.stats import overview_stats  # noqa: E402
 from support_triage.store import InMemoryStore  # noqa: E402
 from support_triage.threads import effective_thread_id  # noqa: E402
 
@@ -127,6 +133,122 @@ def check_thread_case(service: TriageService, case: dict) -> list[str]:
     return failures
 
 
+def _apply_operator_action(service: TriageService, action: dict) -> list[str]:
+    """One declared operator action; `expect_error` names the refusal
+    a correct implementation must raise (matched as a substring)."""
+    kind = action["type"]
+    actor = action.get("actor", "eval-agent")
+    reason = action.get("reason", "eval correction")
+    expect_error = action.get("expect_error")
+    try:
+        if kind == "attach":
+            service.attach_run_to_thread(action["ticket"], action["thread_id"],
+                                         actor=actor, reason=reason)
+        elif kind == "detach":
+            service.detach_run(action["ticket"], actor=actor, reason=reason)
+        elif kind == "merge":
+            service.merge_threads(action["source"], action["target"],
+                                  actor=actor, reason=reason)
+        elif kind == "mark_duplicate":
+            service.mark_duplicate(action["ticket"], action["of"],
+                                   actor=actor, reason=reason)
+        elif kind == "unmark_duplicate":
+            service.unmark_duplicate(action["ticket"], actor=actor, reason=reason)
+        else:
+            return [f"unknown operator action {kind!r}"]
+    except Exception as exc:  # a refusal is a ValueError/KeyError by design
+        if expect_error and expect_error in str(exc):
+            return []
+        return [f"operator action {kind} raised unexpectedly: {exc}"]
+    if expect_error:
+        return [
+            f"operator action {kind} should have been refused "
+            f"({expect_error!r}) but succeeded"
+        ]
+    return []
+
+
+def check_operator_case(service: TriageService, case: dict) -> list[str]:
+    """An operator-correction case (corrections.py).
+
+    Runs the case's tickets (``previous``, ``ticket``, ``thread_pair``,
+    ``extra_tickets``), records any ``outcomes``, applies the
+    ``operator_actions`` in order — each either succeeding or raising
+    its declared refusal — then judges what the case declares: the
+    thread relation before/after, the grouping lineage on corrected
+    records (computed id preserved underneath), and the calibration
+    accounting for confirmed duplicates (excluded from the samples,
+    still counted in volume).
+    """
+    failures: list[str] = []
+    runs = 0
+    if case.get("previous"):
+        service.run_ticket(TicketInput.model_validate(case["previous"]))
+        runs += 1
+    result = service.run_ticket(TicketInput.model_validate(case["ticket"])).result
+    runs += 1
+    failures += check_case(case, result)
+    if case.get("thread_pair"):
+        service.run_ticket(TicketInput.model_validate(case["thread_pair"]["ticket"]))
+        runs += 1
+    for extra in case.get("extra_tickets", []):
+        service.run_ticket(TicketInput.model_validate(extra))
+        runs += 1
+
+    def relation(a: str, b: str) -> str:
+        same = service.run_thread(a)["thread_id"] == service.run_thread(b)["thread_id"]
+        return "same" if same else "separate"
+
+    before = case.get("expect_thread_relation_before")
+    if before and relation(before["a"], before["b"]) != before["relation"]:
+        failures.append(
+            f"premise broken: tickets {before['a']} / {before['b']} are not "
+            f"{before['relation']} before the correction"
+        )
+    for ticket_id, outcome in (case.get("outcomes") or {}).items():
+        service.record_outcome(
+            ticket_id,
+            AgentOutcome(
+                final_category=outcome.get("final_category", ""),
+                final_queue=outcome.get("final_queue", ""),
+                resolved=bool(outcome.get("resolved", False)),
+                recorded_by=outcome.get("by", "eval-agent"),
+            ),
+        )
+    for action in case.get("operator_actions", []):
+        failures += _apply_operator_action(service, action)
+    after = case.get("expect_thread_relation_after")
+    if after and relation(after["a"], after["b"]) != after["relation"]:
+        failures.append(
+            f"tickets {after['a']} / {after['b']} are not {after['relation']} "
+            "after the correction"
+        )
+    for ticket_id in case.get("expect_grouping_lineage", []):
+        record = service.get_record(ticket_id)
+        view = corrections.grouping_view(record)
+        if not view["corrected"]:
+            failures.append(f"{ticket_id} carries no correction lineage")
+        elif view["computed_thread_id"] != effective_thread_id(
+            record.thread_id, record.ticket_id
+        ):
+            failures.append(f"{ticket_id}'s computed thread id was rewritten")
+    for ticket_id in case.get("expect_duplicate_accounting", []):
+        live = live_calibration(service.store.all_records())
+        excluded = [entry["ticket_id"] for entry in live["duplicates_excluded"]]
+        if ticket_id not in excluded:
+            failures.append(
+                f"{ticket_id} is not accounted as an excluded duplicate "
+                "in live calibration"
+            )
+        overview = overview_stats(service.store.all_records())
+        if overview["total_runs"] != runs:
+            failures.append(
+                f"volume stats count {overview['total_runs']} runs, expected {runs} "
+                "(a confirmed duplicate still counts — it was a ticket)"
+            )
+    return failures
+
+
 def check_case(case: dict, result) -> list[str]:
     expected = case["expected"]
     failures: list[str] = []
@@ -189,7 +311,9 @@ def main() -> int:
     for case in cases:
         # A fresh service per case keeps the duplicate index honest:
         # only a case's own `previous` ticket may link to it.
-        if "thread_pair" in case:
+        if "operator_actions" in case:
+            failures = check_operator_case(fresh_service(), case)
+        elif "thread_pair" in case:
             failures = check_thread_case(fresh_service(), case)
         else:
             result, chain_failures = run_case(fresh_service(), case)

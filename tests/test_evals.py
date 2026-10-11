@@ -23,10 +23,12 @@ def _load(name: str):
 def test_golden_cases_all_pass_the_pipeline_checks():
     runner = _load("run_evals")
     cases = runner.load_cases()
-    assert len(cases) == 48
+    assert len(cases) == 51
     failures = {}
     for case in cases:
-        if "thread_pair" in case:
+        if "operator_actions" in case:
+            case_failures = runner.check_operator_case(runner.fresh_service(), case)
+        elif "thread_pair" in case:
             case_failures = runner.check_thread_case(runner.fresh_service(), case)
         else:
             result, chain_failures = runner.run_case(runner.fresh_service(), case)

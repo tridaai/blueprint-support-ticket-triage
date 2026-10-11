@@ -107,8 +107,8 @@ Or natively, offline, in about a minute:
 ```bash
 uv sync --extra dev        # or, without uv: make install-pip
 make demo                  # one ticket, traced end to end
-make test                  # 226 tests
-make evals                 # golden routing 48/48 · calibration gates pass
+make test                  # 241 tests
+make evals                 # golden routing 51/51 · calibration gates pass
 make serve                 # API + console on :8000
 ```
 
@@ -154,17 +154,20 @@ exists for tests and offline demos only. A deployment always sets
 
 Two packs, both deterministic offline:
 
-- **Golden routing set** (`evals/run_evals.py`) — 48 synthetic tickets
+- **Golden routing set** (`evals/run_evals.py`) — 51 synthetic tickets
   with authored category, queue, priority band, and safety flags —
   including the reopen cases (a reopened how_to that must not get a
   template draft, a floor-raised band, a chain that hits the reopen
-  limit) and a thread near-miss that must stay separate.
-  Gate: ≥ 95%. Current: **48/48**.
+  limit), a thread near-miss that must stay separate, and the
+  operator-correction cases (a computed thread pair an operator
+  splits, a confirmed duplicate entering the calibration accounting,
+  and the correction refusals).
+  Gate: ≥ 95%. Current: **51/51**.
 - **Calibration pack** (`evals/run_calibration.py`) — the headline
   eval for a decision system: reliability bins and Brier scores per
-  question against the golden truths. Verify Briers ≤ 0.014, category
-  Brier 0.097, score high-event Briers ≤ 0.018, expected-score MAE
-  ≤ 1.10, worst reliability-bin gap 0.248. Per-kind gates (the kinds
+  question against the golden truths. Verify Briers ≤ 0.013, category
+  Brier 0.092, score high-event Briers ≤ 0.017, expected-score MAE
+  ≤ 1.02, worst reliability-bin gap 0.243. Per-kind gates (the kinds
   have different units; the runner's docstring explains). Reopen
   cases sample their final reopened run. With
   `EVAL_LIVE=1` the configured live backend answers instead and the
@@ -349,6 +352,51 @@ that loop, both enforced in code:
   has a Threads view, a thread chain and reopen form on the
   decision record, and the reopen facts in the record itself.
 
+## Operator corrections: overrule the grouping, confirm the duplicate
+
+Grouping and duplicate-flagging are machine judgements, and both
+are sometimes wrong — two different issues whose words overlap land
+in one thread; a re-sent ticket scores under the duplicate
+threshold. The agent who knows had no way to say so on the record.
+Now they do (`corrections.py`), under rules that keep the machine
+honest and the human accountable:
+
+- **Corrections are an overlay, never a rewrite.** Attach
+  (`POST /api/runs/{id}/thread/attach`), detach
+  (`POST /api/runs/{id}/thread/detach`) and merge
+  (`POST /api/threads/merge`) append an entry to each affected
+  record — actor, reason, from/to thread — and the computed
+  `thread_id` underneath is preserved exactly. Views group by the
+  **effective** thread and show the lineage ("grouping: corrected
+  by … — …", computed id beside it); stats, calibration and replay
+  are untouched, and replay identity over corrected runs is pinned
+  by test and by golden case G49.
+- **Chains move whole.** A correction addressed at any run moves
+  its entire reopen chain — a chain is one conversation by
+  construction and is never split. A detach lands the chain in an
+  operator thread (`thr-op-<chain root>`); a reopen created after
+  a correction joins the corrected thread.
+- **Same customer or nothing.** Attach, merge and duplicate marks
+  all refuse to cross customers, and every correction requires an
+  actor and a reason — an unnamed correction does not exist.
+- **Confirmed duplicates** (`POST /api/runs/{id}/duplicate`,
+  `.../duplicate/unmark`) are the human's word over the intake
+  similarity guess. The mark lands on the duplicate's record only
+  (the survivor is byte-identical), and while it stands the run is
+  **excluded from calibration sampling and the drift window** — it
+  is not a second opinion about the backend — with the exclusion
+  accounted in both payloads (`duplicates_excluded`). It still
+  counts in volume stats: it was a ticket. Marking an already-marked
+  run is a 409 naming the live mark; un-marking fills in the second
+  half of the entry rather than deleting it, and the run samples
+  again. Golden case G50 pins the accounting; G51 the refusals.
+- **The audit export grows both blocks**: the grouping as computed
+  and as corrected with every correction entry, and the
+  confirmed-duplicate block (marks, sampling effect) — in the JSON
+  and the text rendering, which cannot disagree. The console has
+  the correction controls on the Threads view and the mark/unmark
+  form on the decision record.
+
 ## Batch, compare, similar tickets, SLA clocks, events, webhooks
 
 The operations surface around the pipeline:
@@ -447,6 +495,7 @@ src/support_triage/
   replay.py       policy impact replay over stored runs — never writes
   exports.py      one run as a portable audit document (JSON + text)
   threads.py      conversation threads: deterministic grouping, labels only
+  corrections.py  operator overlay: thread corrections + confirmed duplicates
   compare.py      one ticket under several backends, diffed, unqueued
   sla.py          the deterministic SLA clock (band targets vs age)
   events.py       run events + the lifecycle bus behind /api/events

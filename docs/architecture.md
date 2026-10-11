@@ -325,6 +325,66 @@ chains from the records at read time: run counts, open runs,
 whether the thread was ever reopened, the latest outcome — pure
 reads that leave every record byte-identical.
 
+## Operator corrections
+
+The grouping above and the intake duplicate flag are machine
+judgements shipped as labels. **Corrections** (`corrections.py`,
+service methods `attach_run_to_thread` / `detach_run` /
+`merge_threads` / `mark_duplicate` / `unmark_duplicate`) are the
+operator layer over them, stored as append-only entries on the
+record JSON — the same no-migration precedent as outcomes and
+reopens.
+
+**Storage decision: per-record overlay entries, not a corrections
+table.** A thread correction is a fact about the runs it moves,
+and the record is already the unit every read assembles from;
+riding the record means the Postgres payload and the in-memory
+double answer identically with no join and no new migration, and
+the audit export — built from the record alone — carries the full
+lineage for free. The cost is that a merge writes one entry per
+source record; merges are rare, human-paced events, so the write
+amplification is irrelevant next to the read simplicity.
+
+**Chain semantics: corrections move chains, never runs.** Attach
+and detach are addressed at a run but applied to every run in its
+reopen chain (the chain is identified by `ReopenInfo.root_ticket_id`,
+or the run itself). The alternative — refusing to detach a chain
+member — would leave the common case (the follow-up proves the
+chain is mis-grouped) uncorrectable without detaching the root and
+hoping the operator finds it. Moving the whole chain keeps the one
+invariant the grouping itself promises: a chain is one
+conversation, so it sits in exactly one thread, corrected or not.
+A detach names its target `thr-op-<chain root>` — operator threads
+are visibly operator-made and can never collide with a computed
+`thr-<ticket id>`. Reopens created after a correction join the
+chain's *effective* thread, so a corrected chain stays corrected
+as it grows.
+
+**What corrections may never touch.** The decision: answers,
+composition, guardrails, draft, outcome are byte-identical before
+and after any correction (pinned by test over a decision-only dump
+of the record). Replay reads answers only, so identity replay over
+corrected runs moves nothing — also pinned. The one read whose
+numbers change is sampling: `livecal.live_samples` skips records
+with an active duplicate mark, and the drift stream inherits the
+exclusion because it is built from that function. Both payloads
+carry the `duplicates_excluded` accounting (ticket, survivor,
+marker, reason) so the missing sample is a stated fact, not a
+silent gap. Volume reads (`overview_stats`, store metrics) take no
+notice of marks — the run was a ticket and stays counted; the
+overview does carry `confirmed_duplicates` so the population is
+visible as a population.
+
+**Refusal taxonomy.** `CorrectionError` carries its HTTP status:
+409 for state conflicts (double mark, detach-when-alone, attach to
+the current thread, merge into itself, un-mark with no live mark),
+422 for corrections invalid on their face (missing actor or reason,
+self-duplicate, any cross-customer attach/merge/mark — the
+customer key is taken from the stored intake, the same key intake
+grouping uses, so a correction can never join what the machine was
+forbidden to). Unknown runs and threads stay `KeyError` → 404, the
+house style.
+
 ## Events, comparisons, and SLA clocks
 
 **The event bus** (`events.py: EventBus`, owned by the service) is
