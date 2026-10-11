@@ -793,6 +793,40 @@ def run_thread(ticket_id: str):
         raise HTTPException(status_code=404, detail=f"unknown ticket {ticket_id!r}")
 
 
+@app.get("/api/customers/dossier")
+def customer_dossier(key: str = ""):
+    """One customer's dossier (dossier.py), addressed by customer key.
+
+    The key is the thread machinery's: the normalised sender email,
+    or ``name:<normalised name>`` when intake carried no email. The
+    dossier is every stored ticket under that key — counts, outcome
+    history under the small-sample honesty, threads under the
+    EFFECTIVE grouping (operator corrections applied), and the two
+    history flags with their ticket-id evidence. A pure projection:
+    computing it mutates nothing. An unknown key is a 404 — never
+    an empty dossier dressed as knowledge.
+    """
+    try:
+        return get_service().customer_dossier(key)
+    except KeyError as exc:
+        raise HTTPException(
+            status_code=404, detail=exc.args[0] if exc.args else str(exc)
+        )
+
+
+@app.get("/api/runs/{ticket_id}/dossier")
+def run_dossier(ticket_id: str):
+    """The dossier of the customer behind one stored run — the same
+    projection as ``GET /api/customers/dossier``, addressed by any
+    of the customer's runs."""
+    try:
+        return get_service().dossier_for_run(ticket_id)
+    except KeyError as exc:
+        raise HTTPException(
+            status_code=404, detail=exc.args[0] if exc.args else str(exc)
+        )
+
+
 class ThreadAttachRequest(BaseModel):
     thread_id: str  # the existing thread the run's chain should join
     actor: str = ""  # who is correcting the grouping

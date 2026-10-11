@@ -34,7 +34,11 @@ still answer every question about the run:
 - the QA review verdicts (reviews.py), when a reviewer graded this
   run in a sampled round: per-family agreement, the overall
   verdict, and the note — the humans' grading of the triage,
-  carried beside the outcome's grading of the result.
+  carried beside the outcome's grading of the result;
+- the customer history the run was triaged with (dossier.py): the
+  prior counts, the flags with their evidence, the last outcome,
+  and what the backend did with the history block — the context
+  the call was offered, auditable like every other input.
 
 Everything here is composed in code from the stored record. No
 model is consulted and no prose is generated: the text rendering is
@@ -162,6 +166,52 @@ def build_export(
             },
         }
 
+    # Customer history (dossier.py): what the customer's prior
+    # records said when this run was triaged, and what the decision
+    # backend did with the history block — the export shows the
+    # context the call was offered, like the reopen context above.
+    # The flags ride with their evidence; history never entered
+    # composition, and the export says so.
+    history_info = record.history
+    customer_history = {
+        "customer_key": history_info.customer_key,
+        "context": {
+            "provided": history_info.context_provided,
+            "use": history_info.context_use,
+            "note": (
+                "the customer's history — counts, categories, flags, "
+                "the last outcome, composed by code; never another "
+                "ticket's text — was offered to the decision call as "
+                "fenced history"
+                if history_info.context_use == "history_block"
+                else "the deterministic offline backend does not read "
+                "history — its answers come from the new message alone, "
+                "and the record says so"
+                if history_info.context_use == "ignored_offline"
+                else "no prior records — no history context was offered"
+            ),
+        },
+        "prior_tickets": history_info.prior_tickets,
+        "decided": history_info.decided,
+        "reopened": history_info.reopened,
+        "outcomes_recorded": history_info.outcomes_recorded,
+        "resolved_rate": history_info.resolved_rate,
+        "last_outcome": (
+            {
+                "ticket_id": history_info.last_outcome_ticket_id,
+                "final_category": history_info.last_outcome_category,
+                "resolved": history_info.last_outcome_resolved,
+            }
+            if history_info.last_outcome_ticket_id
+            else None
+        ),
+        "flags": [flag.model_dump() for flag in history_info.flags],
+        "composition_note": (
+            "history is context for the call and the agent — it never "
+            "enters the priority formula or the routing matrix"
+        ),
+    }
+
     grouping = corrections.grouping_view(record)
     active_mark = corrections.active_duplicate_mark(record)
     confirmed_duplicate = None
@@ -189,6 +239,7 @@ def build_export(
         "grouping": grouping,
         "confirmed_duplicate": confirmed_duplicate,
         "reopen": reopen,
+        "customer_history": customer_history,
         "injection_screen": {
             "flagged": bool(record.injection_flags),
             "flags": list(record.injection_flags),
@@ -338,6 +389,39 @@ def render_text(document: dict) -> str:
         )
         if intake.get("thread_id"):
             lines.append(f"Thread: {intake['thread_id']}")
+
+    history = document.get("customer_history") or {}
+    lines.append("")
+    lines.append("CUSTOMER HISTORY")
+    if history.get("context", {}).get("provided"):
+        lines.append(
+            f"Customer {history['customer_key']}: {history['prior_tickets']} prior "
+            f"ticket(s) when this run was triaged ({history['decided']} decided, "
+            f"{history['reopened']} reopened runs, {history['outcomes_recorded']} "
+            "recorded outcomes)."
+        )
+        lines.append(f"Context: {history['context']['note']}")
+        if history.get("last_outcome"):
+            last = history["last_outcome"]
+            lines.append(
+                f"Last outcome: {last['ticket_id']} — final category "
+                f"{last['final_category'] or '—'}, "
+                f"{'resolved' if last['resolved'] else 'not resolved'}."
+            )
+        if history.get("flags"):
+            for flag in history["flags"]:
+                lines.append(f"Flag: {flag['detail']}")
+        else:
+            lines.append("History flags: none.")
+    else:
+        lines.append(
+            "First recorded contact for this customer — no history "
+            "context was offered to the decision call."
+        )
+    lines.append(
+        "History is context for the call and the agent — it never "
+        "enters the priority formula or the routing matrix."
+    )
 
     grouping = document.get("grouping") or {}
     if grouping.get("corrected"):

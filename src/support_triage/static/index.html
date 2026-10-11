@@ -491,6 +491,7 @@ function renderResult(r) {
       ${r.outcome ? `<dt>Outcome</dt><dd>${pill('recorded', 'good')} final: ${esc(r.outcome.final_category || '—')} → ${esc(r.outcome.final_queue || '—')} · ${r.outcome.resolved ? 'resolved' : 'not resolved'}${r.outcome.recorded_by ? ` · by ${esc(r.outcome.recorded_by)}` : ''}</dd>` : ''}
       <dt>Thread</dt><dd>${esc(effThread(r))} <span class="note">— the conversation this run belongs to (chain below)</span>${lastCorrection(r) ? `<br><span class="note">grouping: corrected by ${esc(lastCorrection(r).by || 'operator')} — ${esc(lastCorrection(r).reason)} (computed: ${esc(r.thread_id || ('thr-' + r.ticket_id))})</span>` : ''}</dd>
       ${r.reopen ? `<dt>Reopen</dt><dd>${pill('reopen #' + r.reopen.reopen_count, 'warn')} of ${esc(r.reopen.prior_run_id)} · chain root ${esc(r.reopen.root_ticket_id)} · limit ${r.reopen.reopen_limit}${r.reopen.limit_hit ? ' — <span class="flag">limit hit, forced to human review</span>' : ''}<br><span class="note">logged by ${esc(r.reopen.reopened_by || 'agent')} · prior record offered as context: ${esc(r.reopen.context_use || '—')} · template draft suppressed · band floored ${esc(comp.band_before_floor || '')} → ${esc(comp.priority_band)}</span></dd>` : ''}
+      <dt>Customer</dt><dd>${r.history && r.history.context_provided ? `${esc(r.history.customer_key)} · ${r.history.prior_tickets} prior ticket(s), ${r.history.decided} decided${r.history.flags && r.history.flags.length ? ' · ' + r.history.flags.map(f => `<span class="flag">${esc(f.flag)}</span>`).join(' ') : ''}<br><span class="note">history block offered to the decision call: ${esc(r.history.context_use || '—')} — counts and categories only, never another ticket's text; history never enters composition (full dossier below)</span>` : '<span class="note">first recorded contact — no history context was offered</span>'}</dd>
     </dl>
     <div class="row" style="margin-top:10px">
       <button id="export-json">Export audit record (JSON)</button>
@@ -519,6 +520,9 @@ function renderResult(r) {
     </div>
     <h2 style="margin-top:18px">Assignment suggestion <span class="note">(advisory — a human assigns)</span></h2>
     <div id="assignment-box" class="empty">Loading…</div>
+    <h2 style="margin-top:18px">Customer dossier — who is writing, and how it went before</h2>
+    <p class="note">Every stored ticket from this customer, computed in code: the counts, the outcome history (rates withheld on small samples, never dressed up), their conversation threads under the corrected grouping, and the two history flags with the ticket ids that evidence them. A projection — opening it changes nothing.</p>
+    <div id="dossier-box" class="empty">Loading…</div>
     <h2 style="margin-top:18px">Conversation thread</h2>
     <div id="thread-box" class="empty">Loading…</div>
     <h2 style="margin-top:18px">Reopen — the customer came back</h2>
@@ -549,6 +553,7 @@ function renderResult(r) {
   loadAssignment(r.ticket_id);
   loadRunThread(r.ticket_id);
   loadWorkbench(r.ticket_id);
+  loadDossier(r.ticket_id);
   $('reopen-run').onclick = () => submitReopen(r.ticket_id);
   $('dup-mark').onclick = () => submitDuplicateMark(r.ticket_id);
   $('dup-unmark').onclick = () => submitDuplicateUnmark(r.ticket_id);
@@ -771,6 +776,34 @@ async function loadRunThread(id) {
   } catch (e) {
     box.className = 'empty';
     box.textContent = 'Thread unavailable.';
+  }
+}
+
+async function loadDossier(id) {
+  const box = $('dossier-box');
+  if (!box) return;
+  try {
+    const res = await fetch(`/api/runs/${encodeURIComponent(id)}/dossier`, {headers: headers()});
+    if (!res.ok) throw new Error('unavailable');
+    const d = await res.json();
+    const c = d.counts || {};
+    const o = d.outcomes || {};
+    const flags = (d.flags || []).map(f => `<li><span class="flag">${esc(f.flag)}</span> ${esc(f.detail)}</li>`).join('');
+    const rows = (d.tickets || []).map(t => `<tr><td>${esc(t.ticket_id)}</td><td>${esc(t.received_at || '')}</td><td>${esc(t.subject || '')}</td><td>${esc(t.status)}</td><td>${esc(t.category || '')}</td><td>${esc(t.thread_id || '')}${t.grouping && t.grouping.corrected ? ' <span class="note">(corrected)</span>' : ''}</td><td>${t.outcome ? `${t.outcome.resolved ? 'resolved' : 'not resolved'} · ${esc(t.outcome.final_category || '—')}` : '<span class="note">no outcome</span>'}</td></tr>`).join('');
+    box.className = '';
+    box.innerHTML = `
+      <dl class="kv">
+        <dt>Customer</dt><dd>${esc(d.identity && d.identity.name || '')} — ${esc(d.customer_key)} <span class="note">(${esc(d.identity && d.identity.kind || '')} key${d.identity && d.identity.account_tier ? ' · tier ' + esc(d.identity.account_tier) : ''})</span></dd>
+        <dt>Contacts</dt><dd>${c.total} ticket(s) · ${c.open} awaiting an agent · ${c.decided} decided · ${c.reopened} reopened run(s) · ${c.threads} thread(s)</dd>
+        <dt>Outcomes</dt><dd>${o.with_outcome} recorded · ${o.resolved_count} resolved${o.resolved_rate !== null && o.resolved_rate !== undefined ? ` · rate ${Number(o.resolved_rate).toFixed(2)}` : ''}${o.median_hours_from_intake !== null && o.median_hours_from_intake !== undefined ? ` · median ${Number(o.median_hours_from_intake).toFixed(1)}h intake→outcome` : ''}<br><span class="note">${esc(o.note || '')}</span></dd>
+        ${d.last_outcome ? `<dt>Last outcome</dt><dd>${esc(d.last_outcome.ticket_id)} — ${esc(d.last_outcome.final_category || '—')} · ${d.last_outcome.resolved ? 'resolved' : 'not resolved'}</dd>` : ''}
+        <dt>History flags</dt><dd>${flags ? `<ul style="margin:0">${flags}</ul>` : '<span class="note">none — the record does not meet either flag definition</span>'}</dd>
+      </dl>
+      <p class="note">${esc(d.keying_note || '')}</p>
+      <table><tr><th>Ticket</th><th>Received</th><th>Subject</th><th>Status</th><th>Category</th><th>Thread</th><th>Outcome</th></tr>${rows}</table>`;
+  } catch (e) {
+    box.className = 'empty';
+    box.textContent = 'Dossier unavailable (the run carries no resolvable customer key).';
   }
 }
 
