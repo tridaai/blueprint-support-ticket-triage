@@ -1,0 +1,803 @@
+{
+  "cases": 36,
+  "overall_brier": 0.334,
+  "worst_bin_gap": 0.1456,
+  "worst_bin": {
+    "question": "category",
+    "bin": "0.8-0.9",
+    "n": 19,
+    "mean_predicted": 0.8544,
+    "empirical": 1.0,
+    "gap": 0.1456
+  },
+  "per_question": {
+    "contains_pii": {
+      "kind": "verify",
+      "n": 36,
+      "brier": 0.0017,
+      "bins": [
+        {
+          "bin": "0.0-0.1",
+          "n": 34,
+          "mean_predicted": 0.04,
+          "empirical": 0.0,
+          "gap": 0.04
+        },
+        {
+          "bin": "0.1-0.2",
+          "n": 0,
+          "mean_predicted": null,
+          "empirical": null,
+          "gap": null
+        },
+        {
+          "bin": "0.2-0.3",
+          "n": 0,
+          "mean_predicted": null,
+          "empirical": null,
+          "gap": null
+        },
+        {
+          "bin": "0.3-0.4",
+          "n": 0,
+          "mean_predicted": null,
+          "empirical": null,
+          "gap": null
+        },
+        {
+          "bin": "0.4-0.5",
+          "n": 0,
+          "mean_predicted": null,
+          "empirical": null,
+          "gap": null
+        },
+        {
+          "bin": "0.5-0.6",
+          "n": 0,
+          "mean_predicted": null,
+          "empirical": null,
+          "gap": null
+        },
+        {
+          "bin": "0.6-0.7",
+          "n": 0,
+          "mean_predicted": null,
+          "empirical": null,
+          "gap": null
+        },
+        {
+          "bin": "0.7-0.8",
+          "n": 0,
+          "mean_predicted": null,
+          "empirical": null,
+          "gap": null
+        },
+        {
+          "bin": "0.8-0.9",
+          "n": 0,
+          "mean_predicted": null,
+          "empirical": null,
+          "gap": null
+        },
+        {
+          "bin": "0.9-1.0",
+          "n": 2,
+          "mean_predicted": 0.945,
+          "empirical": 1.0,
+          "gap": 0.055
+        }
+      ]
+    },
+    "is_abusive": {
+      "kind": "verify",
+      "n": 36,
+      "brier": 0.0051,
+      "bins": [
+        {
+          "bin": "0.0-0.1",
+          "n": 34,
+          "mean_predicted": 0.03,
+          "empirical": 0.0,
+          "gap": 0.03
+        },
+        {
+          "bin": "0.1-0.2",
+          "n": 0,
+          "mean_predicted": null,
+          "empirical": null,
+          "gap": null
+        },
+        {
+          "bin": "0.2-0.3",
+          "n": 0,
+          "mean_predicted": null,
+          "empirical": null,
+          "gap": null
+        },
+        {
+          "bin": "0.3-0.4",
+          "n": 0,
+          "mean_predicted": null,
+          "empirical": null,
+          "gap": null
+        },
+        {
+          "bin": "0.4-0.5",
+          "n": 0,
+          "mean_predicted": null,
+          "empirical": null,
+          "gap": null
+        },
+        {
+          "bin": "0.5-0.6",
+          "n": 0,
+          "mean_predicted": null,
+          "empirical": null,
+          "gap": null
+        },
+        {
+          "bin": "0.6-0.7",
+          "n": 1,
+          "mean_predicted": 0.62,
+          "empirical": 1.0,
+          "gap": 0.38
+        },
+        {
+          "bin": "0.7-0.8",
+          "n": 0,
+          "mean_predicted": null,
+          "empirical": null,
+          "gap": null
+        },
+        {
+          "bin": "0.8-0.9",
+          "n": 0,
+          "mean_predicted": null,
+          "empirical": null,
+          "gap": null
+        },
+        {
+          "bin": "0.9-1.0",
+          "n": 1,
+          "mean_predicted": 0.9,
+          "empirical": 1.0,
+          "gap": 0.1
+        }
+      ]
+    },
+    "is_outage_report": {
+      "kind": "verify",
+      "n": 36,
+      "brier": 0.0021,
+      "bins": [
+        {
+          "bin": "0.0-0.1",
+          "n": 34,
+          "mean_predicted": 0.04,
+          "empirical": 0.0,
+          "gap": 0.04
+        },
+        {
+          "bin": "0.1-0.2",
+          "n": 0,
+          "mean_predicted": null,
+          "empirical": null,
+          "gap": null
+        },
+        {
+          "bin": "0.2-0.3",
+          "n": 0,
+          "mean_predicted": null,
+          "empirical": null,
+          "gap": null
+        },
+        {
+          "bin": "0.3-0.4",
+          "n": 0,
+          "mean_predicted": null,
+          "empirical": null,
+          "gap": null
+        },
+        {
+          "bin": "0.4-0.5",
+          "n": 0,
+          "mean_predicted": null,
+          "empirical": null,
+          "gap": null
+        },
+        {
+          "bin": "0.5-0.6",
+          "n": 0,
+          "mean_predicted": null,
+          "empirical": null,
+          "gap": null
+        },
+        {
+          "bin": "0.6-0.7",
+          "n": 0,
+          "mean_predicted": null,
+          "empirical": null,
+          "gap": null
+        },
+        {
+          "bin": "0.7-0.8",
+          "n": 0,
+          "mean_predicted": null,
+          "empirical": null,
+          "gap": null
+        },
+        {
+          "bin": "0.8-0.9",
+          "n": 0,
+          "mean_predicted": null,
+          "empirical": null,
+          "gap": null
+        },
+        {
+          "bin": "0.9-1.0",
+          "n": 2,
+          "mean_predicted": 0.9,
+          "empirical": 1.0,
+          "gap": 0.1
+        }
+      ]
+    },
+    "mentions_legal": {
+      "kind": "verify",
+      "n": 36,
+      "brier": 0.0014,
+      "bins": [
+        {
+          "bin": "0.0-0.1",
+          "n": 34,
+          "mean_predicted": 0.03,
+          "empirical": 0.0,
+          "gap": 0.03
+        },
+        {
+          "bin": "0.1-0.2",
+          "n": 0,
+          "mean_predicted": null,
+          "empirical": null,
+          "gap": null
+        },
+        {
+          "bin": "0.2-0.3",
+          "n": 0,
+          "mean_predicted": null,
+          "empirical": null,
+          "gap": null
+        },
+        {
+          "bin": "0.3-0.4",
+          "n": 0,
+          "mean_predicted": null,
+          "empirical": null,
+          "gap": null
+        },
+        {
+          "bin": "0.4-0.5",
+          "n": 0,
+          "mean_predicted": null,
+          "empirical": null,
+          "gap": null
+        },
+        {
+          "bin": "0.5-0.6",
+          "n": 0,
+          "mean_predicted": null,
+          "empirical": null,
+          "gap": null
+        },
+        {
+          "bin": "0.6-0.7",
+          "n": 0,
+          "mean_predicted": null,
+          "empirical": null,
+          "gap": null
+        },
+        {
+          "bin": "0.7-0.8",
+          "n": 0,
+          "mean_predicted": null,
+          "empirical": null,
+          "gap": null
+        },
+        {
+          "bin": "0.8-0.9",
+          "n": 0,
+          "mean_predicted": null,
+          "empirical": null,
+          "gap": null
+        },
+        {
+          "bin": "0.9-1.0",
+          "n": 2,
+          "mean_predicted": 0.9,
+          "empirical": 1.0,
+          "gap": 0.1
+        }
+      ]
+    },
+    "needs_engineering": {
+      "kind": "verify",
+      "n": 36,
+      "brier": 0.0126,
+      "bins": [
+        {
+          "bin": "0.0-0.1",
+          "n": 32,
+          "mean_predicted": 0.08,
+          "empirical": 0.0,
+          "gap": 0.08
+        },
+        {
+          "bin": "0.1-0.2",
+          "n": 0,
+          "mean_predicted": null,
+          "empirical": null,
+          "gap": null
+        },
+        {
+          "bin": "0.2-0.3",
+          "n": 0,
+          "mean_predicted": null,
+          "empirical": null,
+          "gap": null
+        },
+        {
+          "bin": "0.3-0.4",
+          "n": 0,
+          "mean_predicted": null,
+          "empirical": null,
+          "gap": null
+        },
+        {
+          "bin": "0.4-0.5",
+          "n": 0,
+          "mean_predicted": null,
+          "empirical": null,
+          "gap": null
+        },
+        {
+          "bin": "0.5-0.6",
+          "n": 0,
+          "mean_predicted": null,
+          "empirical": null,
+          "gap": null
+        },
+        {
+          "bin": "0.6-0.7",
+          "n": 2,
+          "mean_predicted": 0.68,
+          "empirical": 1.0,
+          "gap": 0.32
+        },
+        {
+          "bin": "0.7-0.8",
+          "n": 0,
+          "mean_predicted": null,
+          "empirical": null,
+          "gap": null
+        },
+        {
+          "bin": "0.8-0.9",
+          "n": 2,
+          "mean_predicted": 0.85,
+          "empirical": 1.0,
+          "gap": 0.15
+        },
+        {
+          "bin": "0.9-1.0",
+          "n": 0,
+          "mean_predicted": null,
+          "empirical": null,
+          "gap": null
+        }
+      ]
+    },
+    "category": {
+      "kind": "choice",
+      "n": 36,
+      "brier": 0.083,
+      "bins": [
+        {
+          "bin": "0.0-0.1",
+          "n": 0,
+          "mean_predicted": null,
+          "empirical": null,
+          "gap": null
+        },
+        {
+          "bin": "0.1-0.2",
+          "n": 0,
+          "mean_predicted": null,
+          "empirical": null,
+          "gap": null
+        },
+        {
+          "bin": "0.2-0.3",
+          "n": 0,
+          "mean_predicted": null,
+          "empirical": null,
+          "gap": null
+        },
+        {
+          "bin": "0.3-0.4",
+          "n": 0,
+          "mean_predicted": null,
+          "empirical": null,
+          "gap": null
+        },
+        {
+          "bin": "0.4-0.5",
+          "n": 0,
+          "mean_predicted": null,
+          "empirical": null,
+          "gap": null
+        },
+        {
+          "bin": "0.5-0.6",
+          "n": 4,
+          "mean_predicted": 0.5511,
+          "empirical": 1.0,
+          "gap": 0.4489
+        },
+        {
+          "bin": "0.6-0.7",
+          "n": 5,
+          "mean_predicted": 0.6449,
+          "empirical": 1.0,
+          "gap": 0.3551
+        },
+        {
+          "bin": "0.7-0.8",
+          "n": 5,
+          "mean_predicted": 0.7524,
+          "empirical": 1.0,
+          "gap": 0.2476
+        },
+        {
+          "bin": "0.8-0.9",
+          "n": 19,
+          "mean_predicted": 0.8544,
+          "empirical": 1.0,
+          "gap": 0.1456
+        },
+        {
+          "bin": "0.9-1.0",
+          "n": 3,
+          "mean_predicted": 0.9341,
+          "empirical": 1.0,
+          "gap": 0.0659
+        }
+      ]
+    },
+    "churn_risk": {
+      "kind": "score",
+      "n": 36,
+      "brier": 0.8081,
+      "high_event_brier": 0.0,
+      "mae": 1.2445,
+      "bins": [
+        {
+          "bin": "0.0-0.1",
+          "n": 35,
+          "mean_predicted": 0.0,
+          "empirical": 0.0,
+          "gap": 0.0
+        },
+        {
+          "bin": "0.1-0.2",
+          "n": 0,
+          "mean_predicted": null,
+          "empirical": null,
+          "gap": null
+        },
+        {
+          "bin": "0.2-0.3",
+          "n": 0,
+          "mean_predicted": null,
+          "empirical": null,
+          "gap": null
+        },
+        {
+          "bin": "0.3-0.4",
+          "n": 0,
+          "mean_predicted": null,
+          "empirical": null,
+          "gap": null
+        },
+        {
+          "bin": "0.4-0.5",
+          "n": 0,
+          "mean_predicted": null,
+          "empirical": null,
+          "gap": null
+        },
+        {
+          "bin": "0.5-0.6",
+          "n": 0,
+          "mean_predicted": null,
+          "empirical": null,
+          "gap": null
+        },
+        {
+          "bin": "0.6-0.7",
+          "n": 0,
+          "mean_predicted": null,
+          "empirical": null,
+          "gap": null
+        },
+        {
+          "bin": "0.7-0.8",
+          "n": 0,
+          "mean_predicted": null,
+          "empirical": null,
+          "gap": null
+        },
+        {
+          "bin": "0.8-0.9",
+          "n": 0,
+          "mean_predicted": null,
+          "empirical": null,
+          "gap": null
+        },
+        {
+          "bin": "0.9-1.0",
+          "n": 1,
+          "mean_predicted": 0.9987,
+          "empirical": 1.0,
+          "gap": 0.0013
+        }
+      ]
+    },
+    "sentiment": {
+      "kind": "score",
+      "n": 36,
+      "brier": 0.7973,
+      "high_event_brier": 0.0131,
+      "mae": 0.9056,
+      "bins": [
+        {
+          "bin": "0.0-0.1",
+          "n": 31,
+          "mean_predicted": 0.0275,
+          "empirical": 0.0,
+          "gap": 0.0275
+        },
+        {
+          "bin": "0.1-0.2",
+          "n": 4,
+          "mean_predicted": 0.1901,
+          "empirical": 0.0,
+          "gap": 0.1901
+        },
+        {
+          "bin": "0.2-0.3",
+          "n": 0,
+          "mean_predicted": null,
+          "empirical": null,
+          "gap": null
+        },
+        {
+          "bin": "0.3-0.4",
+          "n": 0,
+          "mean_predicted": null,
+          "empirical": null,
+          "gap": null
+        },
+        {
+          "bin": "0.4-0.5",
+          "n": 0,
+          "mean_predicted": null,
+          "empirical": null,
+          "gap": null
+        },
+        {
+          "bin": "0.5-0.6",
+          "n": 1,
+          "mean_predicted": 0.5499,
+          "empirical": 0.0,
+          "gap": 0.5499
+        },
+        {
+          "bin": "0.6-0.7",
+          "n": 0,
+          "mean_predicted": null,
+          "empirical": null,
+          "gap": null
+        },
+        {
+          "bin": "0.7-0.8",
+          "n": 0,
+          "mean_predicted": null,
+          "empirical": null,
+          "gap": null
+        },
+        {
+          "bin": "0.8-0.9",
+          "n": 0,
+          "mean_predicted": null,
+          "empirical": null,
+          "gap": null
+        },
+        {
+          "bin": "0.9-1.0",
+          "n": 0,
+          "mean_predicted": null,
+          "empirical": null,
+          "gap": null
+        }
+      ]
+    },
+    "sla_breach_risk": {
+      "kind": "score",
+      "n": 36,
+      "brier": 0.8571,
+      "high_event_brier": 0.0091,
+      "mae": 1.1508,
+      "bins": [
+        {
+          "bin": "0.0-0.1",
+          "n": 34,
+          "mean_predicted": 0.0029,
+          "empirical": 0.0,
+          "gap": 0.0029
+        },
+        {
+          "bin": "0.1-0.2",
+          "n": 0,
+          "mean_predicted": null,
+          "empirical": null,
+          "gap": null
+        },
+        {
+          "bin": "0.2-0.3",
+          "n": 0,
+          "mean_predicted": null,
+          "empirical": null,
+          "gap": null
+        },
+        {
+          "bin": "0.3-0.4",
+          "n": 0,
+          "mean_predicted": null,
+          "empirical": null,
+          "gap": null
+        },
+        {
+          "bin": "0.4-0.5",
+          "n": 0,
+          "mean_predicted": null,
+          "empirical": null,
+          "gap": null
+        },
+        {
+          "bin": "0.5-0.6",
+          "n": 1,
+          "mean_predicted": 0.5623,
+          "empirical": 1.0,
+          "gap": 0.4377
+        },
+        {
+          "bin": "0.6-0.7",
+          "n": 1,
+          "mean_predicted": 0.635,
+          "empirical": 1.0,
+          "gap": 0.365
+        },
+        {
+          "bin": "0.7-0.8",
+          "n": 0,
+          "mean_predicted": null,
+          "empirical": null,
+          "gap": null
+        },
+        {
+          "bin": "0.8-0.9",
+          "n": 0,
+          "mean_predicted": null,
+          "empirical": null,
+          "gap": null
+        },
+        {
+          "bin": "0.9-1.0",
+          "n": 0,
+          "mean_predicted": null,
+          "empirical": null,
+          "gap": null
+        }
+      ]
+    },
+    "urgency": {
+      "kind": "score",
+      "n": 36,
+      "brier": 0.7711,
+      "high_event_brier": 0.0026,
+      "mae": 0.8527,
+      "bins": [
+        {
+          "bin": "0.0-0.1",
+          "n": 32,
+          "mean_predicted": 0.0053,
+          "empirical": 0.0,
+          "gap": 0.0053
+        },
+        {
+          "bin": "0.1-0.2",
+          "n": 0,
+          "mean_predicted": null,
+          "empirical": null,
+          "gap": null
+        },
+        {
+          "bin": "0.2-0.3",
+          "n": 1,
+          "mean_predicted": 0.2784,
+          "empirical": 0.0,
+          "gap": 0.2784
+        },
+        {
+          "bin": "0.3-0.4",
+          "n": 0,
+          "mean_predicted": null,
+          "empirical": null,
+          "gap": null
+        },
+        {
+          "bin": "0.4-0.5",
+          "n": 0,
+          "mean_predicted": null,
+          "empirical": null,
+          "gap": null
+        },
+        {
+          "bin": "0.5-0.6",
+          "n": 0,
+          "mean_predicted": null,
+          "empirical": null,
+          "gap": null
+        },
+        {
+          "bin": "0.6-0.7",
+          "n": 0,
+          "mean_predicted": null,
+          "empirical": null,
+          "gap": null
+        },
+        {
+          "bin": "0.7-0.8",
+          "n": 0,
+          "mean_predicted": null,
+          "empirical": null,
+          "gap": null
+        },
+        {
+          "bin": "0.8-0.9",
+          "n": 0,
+          "mean_predicted": null,
+          "empirical": null,
+          "gap": null
+        },
+        {
+          "bin": "0.9-1.0",
+          "n": 3,
+          "mean_predicted": 0.9613,
+          "empirical": 1.0,
+          "gap": 0.0387
+        }
+      ]
+    }
+  },
+  "backend": "offline",
+  "live": false,
+  "gates": {
+    "verify_brier_max": 0.1,
+    "choice_brier_max": 0.25,
+    "score_event_brier_max": 0.1,
+    "score_mae_max": 1.75,
+    "bin_gap_max": 0.35,
+    "bin_min_n": 8
+  }
+}

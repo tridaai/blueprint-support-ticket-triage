@@ -1,0 +1,338 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Trida AI Blueprint — Support Ticket Triage Agent</title>
+<link rel="icon" type="image/svg+xml" href="/favicon.svg">
+<style>
+  :root { --indigo:#4F46E5; --ink:#0A0A0A; --muted:#6B7280; --line:#E5E7EB; --bg:#FFFFFF; --soft:#F9FAFB; --bad:#B91C1C; --good:#047857; --warn:#B45309; }
+  * { box-sizing: border-box; }
+  body { margin:0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; color:var(--ink); background:var(--bg); }
+  header { border-bottom:1px solid var(--line); padding:18px 28px; }
+  .header-inner { max-width:1440px; margin:0 auto; display:flex; align-items:center; gap:16px; flex-wrap:wrap; }
+  header img { height:38px; }
+  header h1 { font-size:19px; margin:0; font-weight:700; }
+  header h1 .slash { color:var(--muted); font-weight:400; margin:0 2px; }
+  header h1 .accent { color:var(--indigo); }
+  header p { margin:2px 0 0; color:var(--muted); font-size:13px; }
+  .info-chips { display:flex; flex-wrap:wrap; gap:6px; margin-top:6px; }
+  .info-chip { display:inline-block; padding:3px 10px; border:1px solid var(--line); border-radius:999px; font-size:11.5px; color:var(--muted); line-height:1.4; }
+  .gh-link { margin-left:auto; display:flex; flex-direction:column; align-items:center; gap:3px; color:var(--ink); text-decoration:none; flex-shrink:0; padding:6px 10px; border-radius:8px; border:1px solid var(--line); background:var(--soft); }
+  .gh-link svg { display:block; }
+  .gh-link span { font-size:11px; font-weight:600; color:var(--muted); }
+  .gh-link:hover { border-color:var(--indigo); background:#EEF2FF; }
+  .gh-link:hover span { color:var(--indigo); }
+  main { max-width:1440px; margin:0 auto; padding:22px 28px 60px; display:grid; grid-template-columns: 380px 1fr; gap:22px; }
+  @media (max-width: 900px) { main { grid-template-columns: 1fr; } }
+  section { border:1px solid var(--line); border-radius:10px; padding:16px 18px; margin-bottom:18px; background:#fff; overflow-x:auto; }
+  h2 { font-size:14px; text-transform:uppercase; letter-spacing:.06em; color:var(--indigo); margin:0 0 12px; }
+  label { display:block; font-size:13px; color:var(--muted); margin:10px 0 4px; }
+  select, textarea, input[type=text] { width:100%; padding:8px 10px; border:1px solid var(--line); border-radius:8px; font:inherit; font-size:13px; background:#fff; }
+  textarea { min-height:210px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size:12px; }
+  button { font:inherit; font-size:13px; padding:8px 14px; border-radius:8px; border:1px solid var(--line); background:var(--soft); cursor:pointer; }
+  button.primary { background:var(--indigo); border-color:var(--indigo); color:#fff; font-weight:600; }
+  button:disabled { opacity:.45; cursor:not-allowed; }
+  .row { display:flex; gap:8px; flex-wrap:wrap; align-items:center; }
+  .pill { display:inline-block; padding:2px 10px; border-radius:999px; font-size:12px; font-weight:600; background:#EEF2FF; color:var(--indigo); }
+  .pill.bad { background:#FEF2F2; color:var(--bad); }
+  .pill.good { background:#ECFDF5; color:var(--good); }
+  .pill.warn { background:#FFFBEB; color:var(--warn); }
+  .kv { display:grid; grid-template-columns: 150px 1fr; gap:4px 12px; font-size:13.5px; }
+  .kv dt { color:var(--muted); } .kv dd { margin:0; }
+  pre { white-space:pre-wrap; word-break:break-word; background:var(--soft); border:1px solid var(--line); border-radius:8px; padding:12px; font-size:12.5px; max-height:340px; overflow:auto; }
+  table { width:100%; border-collapse:collapse; font-size:13px; }
+  th, td { text-align:left; padding:6px 8px; border-bottom:1px solid var(--line); vertical-align:top; }
+  th { color:var(--muted); font-weight:600; }
+  ul { margin:6px 0; padding-left:18px; font-size:13.5px; }
+  .note { color:var(--muted); font-size:12.5px; }
+  .flag { color:var(--bad); font-weight:600; }
+  .check-pass { color:var(--good); font-weight:600; } .check-fail { color:var(--bad); font-weight:600; }
+  .empty { color:var(--muted); font-size:13.5px; }
+  .bar-row { display:grid; grid-template-columns: 148px 1fr 44px; gap:10px; align-items:center; font-size:12.5px; margin:3px 0; }
+  .bar-row .opt { color:var(--ink); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .bar-track { background:var(--soft); border:1px solid var(--line); border-radius:6px; height:12px; overflow:hidden; }
+  .bar-fill { background:var(--indigo); height:100%; }
+  .bar-fill.hot { background:var(--bad); }
+  .bar-fill.warm { background:var(--warn); }
+  .qblock { border-top:1px solid var(--line); padding:10px 0 6px; }
+  .qblock:first-of-type { border-top:none; }
+  .qhead { display:flex; gap:8px; align-items:baseline; flex-wrap:wrap; margin-bottom:4px; }
+  .qhead .qk { font-weight:700; font-size:13.5px; }
+  .qhead .qv { font-size:13px; color:var(--indigo); font-weight:600; }
+  tr.clickable { cursor:pointer; } tr.clickable:hover { background:var(--soft); }
+  footer { max-width:1440px; margin:0 auto; padding:20px 28px 30px; border-top:1px solid var(--line); color:var(--muted); font-size:12.5px; }
+  .footer-brand { display:flex; align-items:center; gap:6px; margin-bottom:6px; }
+  .footer-brand img { height:32px; width:auto; opacity:.8; }
+  .footer-brand a { color:var(--indigo); text-decoration:none; font-weight:600; font-size:12.5px; }
+  .footer-brand a:hover { text-decoration:underline; }
+</style>
+</head>
+<body>
+<header>
+<div class="header-inner">
+  <img src="/static/brand/tridaai-logo.png" alt="Trida AI">
+  <div>
+    <h1>Blueprint <span class="slash">/</span> <span class="accent">Support Ticket Triage Agent</span></h1>
+    <div class="info-chips">
+      <span class="info-chip">Reference prototype</span>
+      <span class="info-chip">Decisions, not drafts — typed answers with calibrated probabilities, composed in code. Nothing is ever sent to a customer.</span>
+    </div>
+  </div>
+  <a class="gh-link" href="https://github.com/tridaai/blueprint-support-ticket-triage" target="_blank" rel="noopener" title="View source on GitHub">
+    <svg height="22" viewBox="0 0 16 16" width="22" fill="currentColor" aria-hidden="true"><path d="M8 0c-4.42 0-8 3.58-8 8 0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0 0 16 8c0-4.42-3.58-8-8-8z"></path></svg>
+    <span>Go to code</span>
+  </a>
+</div>
+</header>
+
+<main>
+  <div>
+    <section>
+      <h2>1 · Pick a ticket</h2>
+      <label for="sample">Bundled synthetic samples</label>
+      <select id="sample"></select>
+      <label for="json">…or paste ticket JSON</label>
+      <textarea id="json" spellcheck="false"></textarea>
+      <label for="apikey">API key (only when the server sets API_KEY)</label>
+      <input type="text" id="apikey" placeholder="optional">
+      <div class="row" style="margin-top:12px">
+        <button class="primary" id="analyze">Triage ticket</button>
+        <span class="note" id="run-status"></span>
+      </div>
+    </section>
+    <section>
+      <h2>Eval results</h2>
+      <div id="evals" class="empty">Loading…</div>
+      <div id="calibration" class="empty" style="margin-top:10px">Loading calibration…</div>
+    </section>
+    <section>
+      <h2>Agent queue</h2>
+      <div id="queue" class="empty">Loading…</div>
+      <div class="row" style="margin-top:10px">
+        <button id="queue-refresh">Refresh</button>
+        <span class="note">tickets waiting on an agent, highest priority first — click a row to open its decision record.</span>
+      </div>
+    </section>
+    <section>
+      <h2>How it works</h2>
+      <p class="note">intake → injection screen (ticket text is untrusted) → duplicate check (embedding similarity, in code) → <strong>one decision call</strong>: eleven typed questions (Choice / Score / Verify) answered as probability distributions by the engine behind the port (TypeSafe Jev, an LLM on a strict schema, or the offline rules) → composition in code (priority formula, routing matrix + overrides) → guardrails (completeness, distribution sanity, low-confidence forcing, safety flags) → <strong>agent gate</strong>. The model decides nothing consequential; code composes; the agent acts.</p>
+    </section>
+  </div>
+
+  <div>
+    <section id="result-section">
+      <h2>2 · Decision record</h2>
+      <div id="result" class="empty">Nothing yet — triage a ticket.</div>
+    </section>
+    <section id="gate-section" style="display:none">
+      <h2>3 · Agent gate</h2>
+      <label for="actor">Agent name</label>
+      <input type="text" id="actor" placeholder="e.g. A. Agent">
+      <label for="assignee">Assign to (optional, with approve — or use Assign on its own)</label>
+      <input type="text" id="assignee" placeholder="optional">
+      <label for="reason">Decision note (kept on the record)</label>
+      <input type="text" id="reason" placeholder="optional">
+      <div class="row" style="margin-top:12px">
+        <button class="primary" id="approve">Approve triage</button>
+        <button id="reject">Reject</button>
+        <button id="assign">Assign only</button>
+        <span class="note" id="gate-status"></span>
+      </div>
+      <p class="note">Approving records that an agent accepted this triage and routing. The system sends nothing to the customer — a template draft, when offered, is text for the agent to send themselves.</p>
+    </section>
+  </div>
+</main>
+
+<footer>
+  <div class="footer-brand">
+    <img src="/static/brand/tridaai-logo.png" alt="Trida AI">
+    <a href="https://trida.ai/?utm_source=blueprints&utm_medium=footer&utm_campaign=support-ticket-triage" target="_blank" rel="noopener">Visit Trida AI →</a>
+    <a href="https://trida.ai/blog?category=blueprints" target="_blank" rel="noopener">View all blueprints →</a>
+  </div>
+  <p>Trida AI blueprint — Apache 2.0. Runs fully offline with the deterministic rules backend; set DECISION_BACKEND=jev or =llm for a real decision model. Production topology: PostgreSQL (records, checkpoints, pgvector) + S3 payloads — see docker-compose.yaml.</p>
+</footer>
+
+<script>
+const $ = id => document.getElementById(id);
+let currentId = null;
+
+function headers() {
+  const h = {'Content-Type': 'application/json'};
+  const key = $('apikey').value.trim();
+  if (key) h['X-API-Key'] = key;
+  return h;
+}
+function esc(s) { return String(s ?? '').replace(/[&<>""]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+function pill(text, cls) { return `<span class="pill ${cls||''}">${esc(text)}</span>`; }
+function bandPill(band) {
+  const cls = band === 'critical' ? 'bad' : band === 'high' ? 'warn' : band === 'medium' ? '' : 'good';
+  return pill(band, cls);
+}
+function barRow(label, p, cls) {
+  const pct = Math.max(0, Math.min(1, p));
+  return `<div class="bar-row"><span class="opt">${esc(label)}</span><div class="bar-track"><div class="bar-fill ${cls||''}" style="width:${(pct*100).toFixed(1)}%"></div></div><span>${pct.toFixed(2)}</span></div>`;
+}
+
+async function loadSamples() {
+  const res = await fetch('/samples');
+  const data = await res.json();
+  const sel = $('sample');
+  sel.innerHTML = '';
+  data.tickets.forEach((t, i) => {
+    const opt = document.createElement('option');
+    opt.value = i; opt.textContent = `${t.ticket_id} — ${t.subject}`;
+    sel.appendChild(opt);
+  });
+  sel.onchange = () => { $('json').value = JSON.stringify(data.tickets[Number(sel.value)], null, 2); };
+  if (data.tickets.length) { sel.value = '0'; sel.onchange(); }
+}
+
+async function loadEvals() {
+  try {
+    const res = await fetch('/evals/results');
+    if (!res.ok) throw new Error('none');
+    const d = await res.json();
+    $('evals').className = '';
+    $('evals').innerHTML = `<p style="margin:0">Golden routing set: <strong>${d.passed}/${d.total}</strong> passed (${(d.score*100).toFixed(1)}%) · backend <strong>${esc(d.backend)}</strong></p>`;
+  } catch (e) { $('evals').textContent = 'No eval results yet — run `make evals`.'; }
+  try {
+    const res = await fetch('/calibration/results');
+    if (!res.ok) throw new Error('none');
+    const d = await res.json();
+    const rows = Object.entries(d.per_question || {}).map(([k, v]) =>
+      `<tr><td>${esc(k)}</td><td>${v.brier.toFixed(3)}</td><td>${v.n}</td></tr>`).join('');
+    $('calibration').className = '';
+    $('calibration').innerHTML = `<p style="margin:0 0 6px"><strong>Calibration</strong> — overall Brier <strong>${d.overall_brier.toFixed(3)}</strong> over ${d.cases} cases (lower is better; 0.25 ≈ always guessing the base rate)</p>` +
+      (rows ? `<table><tr><th>Question</th><th>Brier</th><th>n</th></tr>${rows}</table>` : '');
+  } catch (e) { $('calibration').textContent = 'No calibration results yet — run `make evals`.'; }
+}
+
+async function loadQueue() {
+  const res = await fetch('/queue', {headers: headers()});
+  const data = await res.json();
+  if (!data.tickets || !data.tickets.length) { $('queue').className = 'empty'; $('queue').textContent = 'Queue is empty.'; return; }
+  $('queue').className = '';
+  $('queue').innerHTML = `<table><tr><th>Ticket</th><th>Category</th><th>Priority</th><th>Queue</th><th>Conf.</th></tr>` +
+    data.tickets.map(t => `<tr class="clickable" data-id="${esc(t.ticket_id)}"><td>${esc(t.ticket_id)}<br><span class="note">${esc(t.subject)}</span></td><td>${esc(t.category)}${t.requires_human_review ? ' <span class="flag">review</span>' : ''}${t.is_duplicate ? ' <span class="pill warn">dup</span>' : ''}</td><td>${t.priority_score.toFixed(1)} ${bandPill(t.priority_band)}</td><td>${esc(t.queue)}</td><td>${(t.category_confidence*100).toFixed(0)}%</td></tr>`).join('') + `</table>`;
+  $('queue').querySelectorAll('tr.clickable').forEach(tr => tr.onclick = () => openTicket(tr.dataset.id));
+}
+
+function renderAnswers(answers) {
+  return answers.map(a => {
+    let bars = '';
+    if (a.kind === 'choice') {
+      const entries = Object.entries(a.probabilities).sort((x, y) => y[1] - x[1]);
+      bars = entries.slice(0, 4).map(([k, p]) => barRow(k, p, k === a.value ? '' : '')).join('') +
+        (entries.length > 4 ? `<div class="note">+ ${entries.length - 4} more options</div>` : '');
+      return `<div class="qblock"><div class="qhead"><span class="qk">${esc(a.key)}</span><span class="pill">choice</span><span class="qv">${esc(a.value)}</span><span class="note">confidence ${(a.confidence*100).toFixed(0)}%</span></div>${bars}</div>`;
+    }
+    if (a.kind === 'score') {
+      const entries = Object.entries(a.probabilities).sort((x, y) => Number(x[0]) - Number(y[0]));
+      bars = entries.map(([k, p]) => barRow('score ' + k, p)).join('');
+      return `<div class="qblock"><div class="qhead"><span class="qk">${esc(a.key)}</span><span class="pill">score</span><span class="qv">expected ${Number(a.value).toFixed(1)} / 10</span><span class="note">confidence ${(a.confidence*100).toFixed(0)}%</span></div>${bars}</div>`;
+    }
+    const p = Number(a.value);
+    const cls = p >= 0.5 ? 'hot' : '';
+    return `<div class="qblock"><div class="qhead"><span class="qk">${esc(a.key)}</span><span class="pill">verify</span><span class="qv">P(true) ${p.toFixed(2)}</span><span class="note">confidence ${(a.confidence*100).toFixed(0)}%</span></div>${barRow('true', p, cls)}</div>`;
+  }).join('');
+}
+
+function renderResult(r) {
+  currentId = r.ticket_id;
+  const comp = r.composition || {};
+  const tele = r.telemetry || {};
+  const contribs = Object.entries(comp.contributions || {}).map(([k, v]) => `<tr><td>${esc(k)}</td><td>${Number(v).toFixed(2)}</td><td class="note">weight ${comp.weights ? comp.weights[k] ?? '' : ''}</td></tr>`).join('');
+  const flags = Object.entries(comp.flags || {}).filter(([, v]) => v).map(([k]) => k);
+  const checks = (r.guardrails.checks || []).map(c =>
+    `<li><span class="${c.passed ? 'check-pass' : 'check-fail'}">${c.passed ? 'PASS' : 'FAIL'}</span> <strong>${esc(c.name)}</strong> — ${esc(c.detail)}</li>`).join('');
+  const trace = (r.trace || []).map(s => `<li><strong>${esc(s.title)}</strong> <span class="note">(${s.duration_ms} ms)</span>${s.details && s.details.length ? `<br><span class="note">${s.details.map(esc).join(' · ')}</span>` : ''}</li>`).join('');
+  $('result').className = '';
+  $('result').innerHTML = `
+    <dl class="kv">
+      <dt>Ticket</dt><dd>${esc(r.ticket_id)} — ${esc(r.subject)}</dd>
+      <dt>Status</dt><dd>${pill(r.status, r.status === 'awaiting_agent' ? 'warn' : 'good')} ${r.decision ? `· decided by ${esc(r.decision_by || 'agent')}` : ''}</dd>
+      <dt>Category</dt><dd>${esc(r.category)} · ${esc(r.product_area)}</dd>
+      <dt>Priority</dt><dd><strong>${Number(comp.priority_score).toFixed(1)}</strong> ${bandPill(comp.priority_band)}</dd>
+      <dt>Queue</dt><dd>${esc(comp.queue)} <span class="note">— ${esc(comp.routing_reason)}</span></dd>
+      <dt>Backend</dt><dd>${esc(tele.backend)} ${tele.model ? `(${esc(tele.model)})` : ''} · decision latency ${tele.decision_latency_ms} ms · ${tele.question_count} questions</dd>
+      <dt>Safety flags</dt><dd>${flags.length ? flags.map(f => pill(f, 'bad')).join(' ') : '<span class="note">none raised</span>'}</dd>
+      <dt>Duplicate</dt><dd>${r.duplicate && r.duplicate.is_duplicate ? `<span class="flag">probable duplicate of ${esc(r.duplicate.similar_ticket_id)}</span> (similarity ${Number(r.duplicate.similarity).toFixed(3)})` : `no (nearest similarity ${r.duplicate ? Number(r.duplicate.similarity).toFixed(3) : '—'})`}</dd>
+      <dt>Human review</dt><dd>${r.guardrails.requires_human_review ? '<span class="flag">forced</span> — ' + r.guardrails.human_review_reasons.map(esc).join('; ') : 'not forced'}</dd>
+      <dt>Autonomy</dt><dd>${r.autonomy.eligible ? pill('auto-resolvable class', 'good') : 'not eligible'} <span class="note">(advisory only — never acted on)${r.autonomy.blockers && r.autonomy.blockers.length ? ' · ' + r.autonomy.blockers.map(esc).join('; ') : ''}</span></dd>
+    </dl>
+    ${r.injection_flags && r.injection_flags.length ? `<p class="flag">Injection screen: ${r.injection_flags.map(esc).join(' · ')}</p>` : ''}
+    <h2 style="margin-top:18px">Decisions — every question, with its distribution</h2>
+    ${renderAnswers(r.answers || [])}
+    <h2 style="margin-top:18px">Composition math</h2>
+    <table><tr><th>Term</th><th>Points</th><th></th></tr>${contribs}${comp.outage_boost_applied ? '<tr><td>outage boost</td><td>+15.00</td><td class="note">P(outage) ≥ 0.5</td></tr>' : ''}<tr><td><strong>Total</strong></td><td><strong>${Number(comp.priority_score).toFixed(1)}</strong></td><td></td></tr></table>
+    <h2 style="margin-top:18px">Guardrails</h2>
+    <ul>${checks}</ul>
+    ${r.draft ? `<h2 style="margin-top:18px">Template draft (for the agent — never sent by the system)</h2><pre>${esc(r.draft.text)}</pre>` : ''}
+    <h2 style="margin-top:18px">Trace</h2>
+    <ul>${trace}</ul>`;
+  const waiting = r.status === 'awaiting_agent';
+  $('gate-section').style.display = waiting ? '' : 'none';
+  $('gate-status').textContent = waiting ? '' : `already decided (${r.status})`;
+}
+
+async function openTicket(id) {
+  const res = await fetch(`/tickets/${encodeURIComponent(id)}`, {headers: headers()});
+  if (!res.ok) { $('run-status').textContent = `could not load ${id}`; return; }
+  renderResult(await res.json());
+}
+
+$('analyze').onclick = async () => {
+  let ticket;
+  try { ticket = JSON.parse($('json').value); }
+  catch (e) { $('run-status').textContent = 'invalid JSON'; return; }
+  $('analyze').disabled = true;
+  $('run-status').textContent = 'triaging…';
+  try {
+    const res = await fetch('/tickets/analyze', {method: 'POST', headers: headers(), body: JSON.stringify(ticket)});
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || res.statusText);
+    renderResult(data);
+    $('run-status').textContent = `triaged → ${data.composition.queue}, priority ${data.composition.priority_score}`;
+    loadQueue();
+  } catch (e) { $('run-status').textContent = 'error: ' + e.message; }
+  $('analyze').disabled = false;
+};
+
+async function decide(decision) {
+  if (!currentId) return;
+  $('gate-status').textContent = 'recording…';
+  const res = await fetch(`/tickets/${encodeURIComponent(currentId)}/decision`, {
+    method: 'POST', headers: headers(),
+    body: JSON.stringify({decision, by: $('actor').value.trim(), reason: $('reason').value.trim(), assignee: $('assignee').value.trim()})
+  });
+  const data = await res.json();
+  if (!res.ok) { $('gate-status').textContent = 'error: ' + (data.detail || res.statusText); return; }
+  renderResult(data);
+  $('gate-status').textContent = `recorded: ${decision} → ${data.status}`;
+  loadQueue();
+}
+$('approve').onclick = () => decide('approved');
+$('reject').onclick = () => decide('rejected');
+$('assign').onclick = async () => {
+  if (!currentId) return;
+  const assignee = $('assignee').value.trim();
+  if (!assignee) { $('gate-status').textContent = 'give an assignee first'; return; }
+  const res = await fetch(`/tickets/${encodeURIComponent(currentId)}/assign`, {
+    method: 'POST', headers: headers(),
+    body: JSON.stringify({assignee, by: $('actor').value.trim()})
+  });
+  const data = await res.json();
+  if (!res.ok) { $('gate-status').textContent = 'error: ' + (data.detail || res.statusText); return; }
+  renderResult(data);
+  $('gate-status').textContent = `assigned to ${assignee} (still awaiting a decision)`;
+  loadQueue();
+};
+$('queue-refresh').onclick = loadQueue;
+
+loadSamples();
+loadEvals();
+loadQueue();
+</script>
+</body>
+</html>

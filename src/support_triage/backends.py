@@ -67,18 +67,26 @@ def _count_hits(text: str, phrases: tuple[str, ...]) -> int:
     return sum(1 for phrase in phrases if phrase in text)
 
 
-def _choice_distribution(scores: dict[str, float], base: float = 0.35) -> dict[str, float]:
+def _choice_distribution(scores: dict[str, float], base: float = 0.15) -> dict[str, float]:
     raw = {key: base + max(0.0, score) for key, score in scores.items()}
     total = sum(raw.values())
     return {key: value / total for key, value in raw.items()}
 
 
-def _score_distribution(target: float, spread: float = 1.1, minimum: int = 0, maximum: int = 10) -> dict[str, float]:
+def _score_distribution(target: float, spread: float = 0.9, minimum: int = 0, maximum: int = 10) -> dict[str, float]:
+    """Gaussian mass around the rubric target.
+
+    A normal shape (not a Laplace/triangular one) on purpose: its
+    truncated mean stays close to the target even near the scale
+    ends, so the expected score the composition reads is the score
+    the rules aimed at. ``spread`` is the sigma — wider when the
+    signals conflict, which is the honest shape of not knowing.
+    """
     import math
 
     target = min(max(target, float(minimum)), float(maximum))
     weights = {
-        str(s): math.exp(-abs(s - target) / spread)
+        str(s): math.exp(-((s - target) ** 2) / (2 * spread * spread))
         for s in range(minimum, maximum + 1)
     }
     total = sum(weights.values())
@@ -108,6 +116,7 @@ _CATEGORY_SIGNALS: dict[str, tuple[tuple[str, float], ...]] = {
         ("crash", 1.8), ("slow", 0.9), ("times out", 1.6), ("timeout", 1.6),
         ("unable to", 1.2), ("can't", 0.8), ("cannot", 0.8), ("freezes", 1.8),
         ("stuck", 1.2), ("won't load", 2.0), ("not loading", 2.0),
+        ("is down", 1.8), ("service unavailable", 1.8), ("outage", 2.0),
     ),
     "account_access": (
         ("log in", 2.2), ("login", 2.0), ("sign in", 2.0), ("password", 2.0),
@@ -118,7 +127,7 @@ _CATEGORY_SIGNALS: dict[str, tuple[tuple[str, float], ...]] = {
     "how_to": (
         ("how do i", 2.6), ("how to", 2.4), ("how can i", 2.2),
         ("where can i", 1.8), ("where do i", 1.8), ("is it possible to", 1.8),
-        ("can i", 0.9), ("instructions", 1.4), ("guide", 1.2),
+        ("can i", 0.9), ("how-to", 1.2), ("guide", 1.2),
         ("setting up", 1.4), ("set up", 1.0), ("configure", 0.9),
     ),
     "bug_report": (
@@ -173,7 +182,9 @@ _AREA_SIGNALS: dict[str, tuple[tuple[str, float], ...]] = {
 _URGENCY_UP = (
     ("urgent", 2.6), ("asap", 2.4), ("immediately", 2.2), ("blocked", 2.2),
     ("can't work", 2.0), ("cannot work", 2.0), ("deadline", 1.6),
-    ("production", 1.2), ("losing money", 2.4), ("critical", 1.8),
+    ("production", 1.2), ("losing money", 2.4), ("losing sales", 2.0),
+    ("critical", 1.8), ("for everyone", 1.2), ("customers are affected", 1.2),
+    ("every order", 1.0),
     ("today", 0.7), ("right now", 1.6), ("emergency", 2.4),
 )
 _URGENCY_DOWN = (
@@ -193,13 +204,14 @@ _CHURN = (
     ("cancel my account", 4.2), ("cancel the account", 3.6),
     ("close my account", 4.0), ("switching to", 3.4), ("competitor", 2.8),
     ("end my subscription", 3.8), ("cancel my subscription", 3.8),
+    ("look at alternatives", 2.4), ("evaluating alternatives", 2.4),
     ("moving to", 1.8), ("leaving", 1.6), ("cancel", 1.4),
 )
 _SLA_PRESSURE = (
     ("still no reply", 2.6), ("no response", 2.2), ("waiting since", 2.2),
-    ("days ago", 1.6), ("hours ago", 1.2), ("follow up", 1.4),
-    ("following up", 1.4), ("second time", 1.4), ("third time", 1.8),
-    ("sla", 2.0),
+    ("days ago", 1.6), ("hours ago", 1.2), ("hour ago", 1.2),
+    ("follow up", 1.4), ("following up", 1.4), ("second time", 1.4),
+    ("third time", 1.8), ("sla", 2.0),
 )
 
 
@@ -216,7 +228,14 @@ class OfflineDecisionEngine:
 
     def decide(self, state: str, questions: list[Question]) -> DecisionSet:
         started = time.perf_counter()
-        text = f"\n{state.lower()}\n"
+        # Score the ticket's own words only: the state wrapper (the
+        # <<<UNTRUSTED>>> fence lines) is pipeline boilerplate, not
+        # ticket text — left in, its wording ("never instructions")
+        # would itself trip keyword rules.
+        own_words = "\n".join(
+            line for line in state.splitlines() if not line.startswith("<<<")
+        )
+        text = f"\n{own_words.lower()}\n"
         raw = {q.key: {"probabilities": self._answer(text, q)} for q in questions}
         latency_ms = round((time.perf_counter() - started) * 1000, 2)
         return build_decision_set(
@@ -228,14 +247,20 @@ class OfflineDecisionEngine:
     def _answer(self, text: str, question: Question) -> dict[str, float]:
         if isinstance(question, ChoiceQuestion):
             signals = _CATEGORY_SIGNALS if question.key == "category" else _AREA_SIGNALS
+            # Evidence counts at 1.75x the raw phrase weights: the weights
+            # are relative units, and at lower scales the resulting
+            # distributions were measurably under-confident on the
+            # golden set (empirical accuracy 1.0 in every confidence
+            # bin — the calibration pack caught it; see
+            # evals/run_calibration.py).
             scores = {
-                option: sum(weight for phrase, weight in signals.get(option, ()) if phrase in text)
+                option: 1.75 * sum(weight for phrase, weight in signals.get(option, ()) if phrase in text)
                 for option in question.options
             }
             if question.key == "category" and max(scores.values(), default=0.0) < 1.0:
-                scores["other"] += 2.2  # no signal: honestly "other"
+                scores["other"] += 1.6  # no signal: honestly "other", not confidently
             if question.key == "product_area" and max(scores.values(), default=0.0) < 1.0:
-                scores["other"] += 1.8
+                scores["other"] += 1.3
             return _choice_distribution(scores)
         if isinstance(question, ScoreQuestion):
             target, spread = self._score_target(text, question.key)
@@ -248,23 +273,25 @@ class OfflineDecisionEngine:
         if key == "urgency":
             target = 3.0 + sum(w for phrase, w in _URGENCY_UP if phrase in text)
             target += sum(w for phrase, w in _URGENCY_DOWN if phrase in text)
-            spread = 1.5 if ("no rush" in text and "urgent" in text) else 1.1
+            spread = 1.3 if ("no rush" in text and "urgent" in text) else 0.9
             return target, spread
         if key == "sentiment":
             pos = _count_hits(text, _POSITIVE)
             neg = _count_hits(text, _NEGATIVE)
-            return 5.0 + 0.8 * pos - 1.1 * neg, 1.2 if pos and neg else 1.0
+            return 5.0 + 0.8 * pos - 1.1 * neg, 1.1 if pos and neg else 0.85
         if key == "churn_risk":
             target = 1.5 + sum(w for phrase, w in _CHURN if phrase in text)
-            return target, 1.1
+            return target, 0.9
         if key == "sla_breach_risk":
             target = 2.5 + sum(w for phrase, w in _SLA_PRESSURE if phrase in text)
             urgency, _ = self._score_target(text, "urgency")
             target += max(0.0, urgency - 5.0) * 0.45
+            if "is down" in text or "outage" in text:
+                target += 2.0  # an outage burns the SLA clock from minute one
             if "enterprise" in text:
                 target += 0.8
-            return target, 1.2
-        return 5.0, 1.5  # pragma: no cover - the question set is fixed
+            return target, 1.0
+        return 5.0, 1.3  # pragma: no cover - the question set is fixed
 
     def _verify_probability(self, text: str, key: str) -> float:
         if key == "contains_pii":
@@ -273,7 +300,7 @@ class OfflineDecisionEngine:
                 (r"\b\d{3}-\d{2}-\d{4}\b", 0.97),  # SSN shape
                 (r"\b[a-z]{2}\d{2}(?:[ ]?[a-z0-9]{4}){3,}\b", 0.9),  # IBAN-ish (state is lowercased before matching)
                 (r"my password is", 0.92),
-                (r"password[: ]+\S+", 0.75),
+                (r"password:\s*\S+", 0.8),
                 (r"date of birth", 0.8),
                 (r"my home address", 0.72),
                 (r"my phone number is", 0.7),
@@ -322,6 +349,10 @@ class OfflineDecisionEngine:
                 return 0.85
             if any(phrase in text for phrase in mild):
                 return 0.6
+            if "is down" in text or "service unavailable" in text:
+                # A service-side outage is infrastructure work by shape,
+                # even when the ticket never says the word engineering.
+                return 0.68
             return 0.08
         return 0.05  # pragma: no cover - the question set is fixed
 
