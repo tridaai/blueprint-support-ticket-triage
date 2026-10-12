@@ -760,6 +760,18 @@ def render_text(document: dict) -> str:
             )
             if stats["flag"]:
                 lines.append(f"Flag: {stats['flag']} — {stats['flag_detail']}")
+            if stats.get("template_version"):
+                lines.append(
+                    f"Drafted under version {stats['template_version']} "
+                    "of the template, live at the time — only a live "
+                    "template drafts (template_governance.py)."
+                )
+            else:
+                lines.append(
+                    "Drafted while the template stood live; the run "
+                    "predates recorded template versions, so no "
+                    "version is claimed for it."
+                )
             lines.append(
                 "The flag advises the template's owners; it changes "
                 "nothing about any run, this one included."

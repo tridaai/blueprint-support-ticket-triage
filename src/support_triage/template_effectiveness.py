@@ -48,6 +48,11 @@ that measurement, computed in code over the stored records:
   reads this module (the dossier firewall's sibling): the same
   ticket composes byte-identically the day before and the day
   after its template is flagged, and the golden set pins that.
+  Template governance (template_governance.py) reads the flag
+  one step further — a standing flag over enough uses proposes
+  the template's retirement — but a proposal is still not an
+  act: only a named editor retires a template, and selection
+  reads the governance record, never this report.
 - **Confirmed duplicates are not second opinions.** A run under an
   active operator duplicate mark is excluded from the rates (the
   calibration-sampling precedent: a duplicate is the same customer
@@ -272,12 +277,25 @@ def template_stats_for_run(report: dict, record: TicketResult) -> dict:
                 "and no template's track record is attributed to it"
             ),
         }
+    # The governance stamp the run itself carries (templates.py,
+    # template_governance.py): the version of the template this
+    # draft was written under, and the state it stood in at the
+    # time — live, necessarily: only a live template drafts, and
+    # a draft on the record is the proof it did. A version of 0
+    # is the pre-governance shape — the run predates recorded
+    # versions — and is reported as unrecorded, never backfilled.
+    version = record.draft.template_version if record.draft else 0
+    stamp = {
+        "template_version": version if version else None,
+        "template_state_at_draft": "live",
+    }
     for row in report["templates"]:
         if row["template"] == name and row["category"] == record.category:
-            return {"template": name, "state": "measured", **row}
+            return {"template": name, "state": "measured", **row, **stamp}
     return {
         "template": name,
         "state": "unmeasured",
+        **stamp,
         "note": (
             "no outcome-bearing uses of this template are measured "
             "yet — a template is judged only where a ticket's later "
