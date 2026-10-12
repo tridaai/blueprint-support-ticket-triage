@@ -1,6 +1,6 @@
 """Golden routing eval: known tickets in, routing truth checked.
 
-Sixty-eight synthetic tickets with authored expectations — category,
+Sixty-nine synthetic tickets with authored expectations — category,
 queue, priority band, and the five safety/engineering verify flags.
 (36 through round 2; round 3 added multi-issue tickets, three more
 injection phrasings, a calm ticket that must stay low, a repeat
@@ -47,7 +47,15 @@ a plain run outranking a feared outage purely on the clock (the
 model's sla_breach_risk shown, never sorted by), the gate-note
 assignee read off the watch, and the lead's reassignment asserted
 as an overlay: the record byte-identical apart from its
-assignment trail, the clock unmoved, the refusals named.)
+assignment trail, the clock unmoved, the refusals named; the
+shift-handoff round added the handoff case — a staged desk at a
+fixed boundary (a confirmed cluster, a breached outage, a QA
+sample with grading owed) whose composed page is asserted
+section by section against hand-derived figures, then the
+handshake played out: self-acceptance refused, acceptance with
+exceptions storing the dispute and editing no figure, a newer
+page superseding an unaccepted one, and every run record
+byte-identical across the whole lifecycle.)
 Each case runs the full pipeline (screen → duplicate → one decision
 call → composition → guardrails) through a fresh service, on the
 deterministic offline backend by default, so the gate is hermetic:
@@ -1424,6 +1432,293 @@ def check_watch_case(service: TriageService, case: dict) -> list[str]:
     return failures
 
 
+def check_handoff_case(service: TriageService, case: dict) -> list[str]:
+    """A shift-handoff case (handoffs.py).
+
+    Seeds a staged desk — each seed's decided band and placement
+    asserted as a premise — then plays the case's
+    ``handoff_actions`` at the case's fixed boundary instant:
+    decisions and a cluster confirmation stage the world, a QA
+    sample is drawn and partly graded, and handoffs are composed
+    and judged section by section against the hand-derived
+    figures the case carries. The handshake plays out in full:
+    self-acceptance refused, a third party refused, acceptance
+    with exceptions storing the dispute verbatim while the
+    composed sections stay byte-identical, a newer page
+    superseding an unaccepted one (which then refuses
+    acceptance), and a final plain acceptance. After every action
+    that is not itself a run-writing act, the stored run records
+    are checked byte-identical against the snapshot: a handoff is
+    a desk-level record, and a shift change moves no triage.
+    """
+    from support_triage.sla import format_timestamp, parse_timestamp
+
+    failures: list[str] = []
+    now = parse_timestamp(case["handoff_now"])
+    if now is None:
+        return [f"handoff_now {case['handoff_now']!r} does not parse"]
+
+    for entry in case.get("handoff_seed", []):
+        ticket = TicketInput.model_validate(entry["ticket"])
+        result = service.run_ticket(ticket).result
+        wanted_band = entry.get("expect_band")
+        if wanted_band and result.composition.priority_band != wanted_band:
+            failures.append(
+                f"{ticket.ticket_id}: premise broken — decided band "
+                f"{result.composition.priority_band!r}, expected "
+                f"{wanted_band!r}; the handoff figures would prove nothing"
+            )
+        placement = entry.get("expect_placement") or {}
+        for field in ("category", "product_area"):
+            wanted = placement.get(field)
+            if wanted and getattr(result, field) != wanted:
+                failures.append(
+                    f"{ticket.ticket_id}: premise broken — decided "
+                    f"{field} {getattr(result, field)!r}, expected {wanted!r}"
+                )
+
+    snapshot = {
+        record.ticket_id: record.model_dump_json()
+        for record in service.store.all_records()
+    }
+
+    def records_unchanged(label: str) -> None:
+        current = {
+            record.ticket_id: record.model_dump_json()
+            for record in service.store.all_records()
+        }
+        for ticket_id, before in snapshot.items():
+            if current.get(ticket_id) != before:
+                failures.append(
+                    f"{label}: run {ticket_id}'s record changed — a "
+                    "handoff is a desk-level record and must never "
+                    "write to a run"
+                )
+        snapshot.update(
+            {tid: blob for tid, blob in current.items() if tid not in snapshot}
+        )
+
+    def proposal_for(members: list[str]) -> dict | None:
+        wanted = sorted(members)
+        for proposal in service.cluster_proposals()["proposals"]:
+            if sorted(m["ticket_id"] for m in proposal["members"]) == wanted:
+                return proposal
+        return None
+
+    def check_sections(label: str, handoff, expected: dict) -> None:
+        sections = handoff.sections
+        watch = sections["watch"]
+        if watch["counts"] != expected["watch_counts"]:
+            failures.append(
+                f"{label}: watch counts {watch['counts']}, expected "
+                f"{expected['watch_counts']}"
+            )
+        # The composition pin, in golden form: the page's counts
+        # are the watch's own, recomputed at the same instant.
+        live = service.breach_watch(now)
+        if watch["counts"] != live["counts"]:
+            failures.append(
+                f"{label}: the page's watch counts {watch['counts']} "
+                f"disagree with the watch itself ({live['counts']})"
+            )
+        if watch["open_runs"] != expected["watch_open"]:
+            failures.append(
+                f"{label}: watch open_runs {watch['open_runs']}, "
+                f"expected {expected['watch_open']}"
+            )
+        top = [row["ticket_id"] for row in watch["top_rows"]]
+        if top != expected["watch_top"]:
+            failures.append(
+                f"{label}: watch top rows {top}, expected {expected['watch_top']}"
+            )
+        if sections["queues"]["rows"] != expected["queues"]:
+            failures.append(
+                f"{label}: queue rows {sections['queues']['rows']}, "
+                f"expected {expected['queues']}"
+            )
+        incidents = sections["incidents"]
+        for key, wanted in expected["incidents"].items():
+            if key in ("member_count", "open_members"):
+                got = incidents["open"][0][key] if incidents["open"] else None
+            else:
+                got = incidents.get(key)
+            if got != wanted:
+                failures.append(
+                    f"{label}: incidents {key} = {got}, expected {wanted}"
+                )
+        qa = sections["qa_review"]
+        for key, wanted in expected["qa"].items():
+            if qa.get(key) != wanted:
+                failures.append(
+                    f"{label}: qa {key} = {qa.get(key)}, expected {wanted}"
+                )
+
+    for index, action in enumerate(case.get("handoff_actions", [])):
+        kind = action["type"]
+        label = f"action {index} ({kind})"
+        expect_error = action.get("expect_error")
+        try:
+            if kind == "decide":
+                service.record_decision(
+                    action["ticket"], action.get("decision", "approved"),
+                    by=action.get("by", "eval-agent"),
+                )
+                snapshot.update(
+                    {
+                        record.ticket_id: record.model_dump_json()
+                        for record in service.store.all_records()
+                    }
+                )
+            elif kind == "confirm_cluster":
+                proposal = proposal_for(action["members"])
+                if proposal is None:
+                    failures.append(
+                        f"{label}: no live proposal for members "
+                        f"{action['members']} to confirm"
+                    )
+                else:
+                    incident = service.confirm_cluster(
+                        proposal["proposal_id"],
+                        actor=action.get("actor", "eval-lead"),
+                    )
+                    if action.get("expect_incident") and (
+                        incident.incident_id != action["expect_incident"]
+                    ):
+                        failures.append(
+                            f"{label}: confirmed as {incident.incident_id}, "
+                            f"expected {action['expect_incident']}"
+                        )
+                records_unchanged(label)
+            elif kind == "sample":
+                sample = service.create_review_sample(
+                    size=action["size"],
+                    seed=action.get("seed", 0),
+                    created_by=action.get("by", "qa-lead"),
+                )
+                if action.get("expect_sample") and (
+                    sample.sample_id != action["expect_sample"]
+                ):
+                    failures.append(
+                        f"{label}: sample {sample.sample_id}, expected "
+                        f"{action['expect_sample']}"
+                    )
+                if "expect_drawn" in action and (
+                    len(sample.run_ids) != action["expect_drawn"]
+                ):
+                    failures.append(
+                        f"{label}: drew {len(sample.run_ids)} runs, "
+                        f"expected {action['expect_drawn']}"
+                    )
+                records_unchanged(label)
+            elif kind == "verdict":
+                service.record_review_verdict(
+                    action["sample"],
+                    ticket_id=action["ticket"],
+                    reviewer=action.get("reviewer", "qa-lead"),
+                    families={
+                        "category": "agree",
+                        "priority_drivers": "agree",
+                        "routing": "agree",
+                        "verify": "agree",
+                    },
+                    overall="agree",
+                )
+                records_unchanged(label)
+            elif kind == "create":
+                handoff = service.create_handoff(
+                    from_lead=action.get("from_lead", ""),
+                    to_lead=action.get("to_lead", ""),
+                    note=action.get("note", ""),
+                    now=now,
+                )
+                if action.get("expect_handoff") and (
+                    handoff.handoff_id != action["expect_handoff"]
+                ):
+                    failures.append(
+                        f"{label}: created {handoff.handoff_id}, expected "
+                        f"{action['expect_handoff']}"
+                    )
+                if handoff.as_of != format_timestamp(now):
+                    failures.append(
+                        f"{label}: as_of {handoff.as_of!r}, expected the "
+                        f"boundary {format_timestamp(now)!r}"
+                    )
+                if handoff.status != "outstanding":
+                    failures.append(
+                        f"{label}: new handoff is {handoff.status}, "
+                        "expected outstanding"
+                    )
+                if "expect_sections" in action:
+                    check_sections(label, handoff, action["expect_sections"])
+                if "expect_supersedes" in action:
+                    older = service.get_handoff(action["expect_supersedes"])
+                    if older["status"] != "superseded":
+                        failures.append(
+                            f"{label}: {action['expect_supersedes']} is "
+                            f"{older['status']}, expected superseded"
+                        )
+                records_unchanged(label)
+            elif kind == "accept":
+                before = service.get_handoff(action["handoff"])
+                accepted = service.accept_handoff(
+                    action["handoff"],
+                    actor=action.get("actor", ""),
+                    exceptions=action.get("exceptions", ""),
+                    now=now,
+                )
+                if accepted.status != "accepted":
+                    failures.append(
+                        f"{label}: handoff is {accepted.status} after "
+                        "acceptance, expected accepted"
+                    )
+                if "expect_acceptance" in action and (
+                    accepted.acceptance != action["expect_acceptance"]
+                ):
+                    failures.append(
+                        f"{label}: acceptance {accepted.acceptance!r}, "
+                        f"expected {action['expect_acceptance']!r}"
+                    )
+                if accepted.exceptions != action.get("exceptions", ""):
+                    failures.append(
+                        f"{label}: exceptions {accepted.exceptions!r}, "
+                        f"expected {action.get('exceptions', '')!r}"
+                    )
+                if accepted.sections != before["sections"]:
+                    failures.append(
+                        f"{label}: the composed sections changed under "
+                        "acceptance — exceptions ride beside the figures, "
+                        "never over them"
+                    )
+                if accepted.accepted_at != format_timestamp(now):
+                    failures.append(
+                        f"{label}: accepted_at {accepted.accepted_at!r}, "
+                        f"expected the boundary {format_timestamp(now)!r}"
+                    )
+                records_unchanged(label)
+            elif kind == "expect_handoff":
+                view = service.get_handoff(action["handoff"])
+                if view["status"] != action["status"]:
+                    failures.append(
+                        f"{label}: {action['handoff']} is {view['status']}, "
+                        f"expected {action['status']}"
+                    )
+                records_unchanged(label)
+            else:
+                failures.append(f"{label}: unknown handoff action {kind!r}")
+        except Exception as exc:  # a refusal is a HandoffError by design
+            if not (expect_error and expect_error in str(exc)):
+                failures.append(f"{label}: raised unexpectedly: {exc}")
+            else:
+                records_unchanged(label)
+        else:
+            if expect_error:
+                failures.append(
+                    f"{label}: should have been refused ({expect_error!r}) "
+                    "but succeeded"
+                )
+    return failures
+
+
 def main() -> int:
     cases = load_cases()
     service = fresh_service()
@@ -1434,6 +1729,8 @@ def main() -> int:
         # only a case's own `previous` ticket may link to it.
         if "template_seed" in case:
             failures = check_template_case(fresh_service(), case)
+        elif "handoff_seed" in case:
+            failures = check_handoff_case(fresh_service(), case)
         elif "watch_seed" in case:
             failures = check_watch_case(fresh_service(), case)
         elif "incident_seed" in case:
