@@ -108,6 +108,17 @@ every route delegates, none re-implements. Notable behaviour:
   record is never edited, and the surfaces annotate it instead —
   a badge on the queue row, an ``incident_context`` line on the
   run's record view, a block in the audit export;
+- the template-governance layer (template_governance.py): ``GET
+  /api/templates`` / ``GET /api/templates/{name}`` serve the
+  effective registry — each template's state (draft / live /
+  retired), version, effectiveness row and the retirement
+  watch's verdict under the authored constants — and ``POST
+  /api/templates`` (author), ``POST /api/templates/{name}/edit``
+  / ``.../promote`` / ``.../retire`` record the named acts:
+  editing returns a live template to draft at a bumped version,
+  promotion refuses the version's own author by name, and a
+  retirement-due template keeps serving until a named editor
+  retires it;
 - ``/readiness`` fails (503) when PostgreSQL is configured but
   unreachable, and says honestly when the in-memory test doubles are
   in use (records lost on restart — fine for a look, not for work).

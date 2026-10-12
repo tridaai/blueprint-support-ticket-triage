@@ -660,18 +660,85 @@ when a template's reopen rate exceeds its category baseline by
 more than the authored margin (0.25), both quotable (five-use
 floor, this repo's third small-sample floor — sized like the QA
 report's because a reopen rate over four tickets is the same
-kind of anecdote). Nothing consumes the flag: no suppression
-list is consulted at draft time, no composition input exists
-for it to move. That is the dossier firewall again, one level
-up — measurement that cannot feed back into the measured system
-without a human deciding it should. The golden firewall case
-(G65) is the pin: with the flag standing in the store, a probe
-ticket's composition and answers are byte-identical to a fresh
-service's, and the flagged template is still drafted, word for
-word. The audit export carries the run's own template's row
-(handed in by the service, like the QA verdicts) so the reader
-of one run meets the population evidence without the export
-becoming a second report implementation.
+kind of anecdote). Nothing in composition consumes the flag: no
+suppression list is consulted at draft time, no composition
+input exists for it to move. That is the dossier firewall
+again, one level up — measurement that cannot feed back into
+the measured system without a human deciding it should. The
+golden firewall case (G65) is the pin: with the flag standing
+in the store, a probe ticket's composition and answers are
+byte-identical to a fresh service's, and the flagged template
+is still drafted, word for word. The audit export carries the
+run's own template's row (handed in by the service, like the QA
+verdicts) so the reader of one run meets the population
+evidence without the export becoming a second report
+implementation. The one reader the flag later gained is
+governance's retirement watch, below — a proposal surface for
+humans, still not a composition input.
+
+## Template governance
+
+`template_governance.py` governs the words the effectiveness
+report grades. Before it, the templates were code constants:
+live by construction, changed by editing the package, retired
+never — no record, no states, no author. The design question
+was where governed state lives. The roster precedent
+(`roster.py`) loads a bundled data file read-only; a lifecycle
+cannot be read-only, and a template's state is operational data
+beside the runs it drafts for, so governed templates are store
+records (migration `0007_templates.sql`, the store's
+one-row-per-record JSON idiom) — an overlay, not a replacement:
+the bundled words remain the default view, and a name with no
+record stands bundled (live, version 1). The first act on a
+name materialises its record; from then on the record is the
+template, and registry, selection, and console all read that
+one effective view.
+
+**Selection gains one check, at its one existing place.** The
+safest-slice gates (how_to, confident, flagless, guardrails
+green, never a reopen, never a duplicate) are untouched and
+still evaluated first; the state check sits beside them in
+`templates.py`, sharing one gate function with the explanation
+helper so the rule and its account cannot drift. A governed
+row that is not live withholds the draft, and the compose node
+records the skip in the trace vocabulary reopen runs already
+use. Runs take a registry snapshot at intake (`template_records`
+on the graph state), so an act lands on the next run and never
+mid-run; a governed live row supplies its words and version,
+stamped onto the draft (`DraftInfo.template_version`) and into
+the audit export — which is how the export can say which
+version a run was drafted under, and say *unrecorded* rather
+than guess for runs that predate the stamp.
+
+**The acts are the repo's named-act idiom.** Authoring or
+editing requires a named editor and a recorded reason; words
+are validated at authoring (the draft must carry the `{guide}`
+pointer and only fillable placeholders) so a broken template
+fails at the desk, not inside a run. Editing bumps the version,
+makes the editor the version's author, and drops a live
+template back to draft. Promotion requires a named approver
+distinct from the version's author — the handoff precedent
+(nobody signs their own page) — citing the basis; the history
+is append-only, one entry per act.
+
+**Retirement: proposed by the numbers, decided by a person.**
+The watch computes nothing of its own: it reads the
+effectiveness row for (template, category) and proposes
+retirement when the row's `needs_review` flag stands over at
+least `RETIREMENT_MIN_USES` (10) uses — twice the five-use
+quotability floor, because retirement acts on the business in a
+way a flag does not, and because the margin test dilutes as
+the template's own share of its baseline grows. The decision
+recorded in the module is that a due template **keeps
+serving** until a named editor retires it: the flag is
+population evidence (a rate over past tickets), not a per-draft
+verdict — the safest-slice gates and the agent's send-time
+judgement still stand between any one draft and a customer —
+and the desk's proposal idiom (incidents, breach watch) is that
+computed views propose and named humans dispose. Retired is
+terminal: no un-retire act exists, because a template that must
+serve again can be re-authored as new words by a new act, with
+the retired record's history intact beside it.
 
 ## Incident clustering
 

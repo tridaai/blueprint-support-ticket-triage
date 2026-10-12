@@ -107,8 +107,8 @@ Or natively, offline, in about a minute:
 ```bash
 uv sync --extra dev        # or, without uv: make install-pip
 make demo                  # one ticket, traced end to end
-make test                  # 357 tests
-make evals                 # golden routing 69/69 · calibration gates pass
+make test                  # 390 tests
+make evals                 # golden routing 70/70 · calibration gates pass
 make serve                 # API + console on :8000
 ```
 
@@ -190,8 +190,15 @@ Two packs, both deterministic offline:
   against hand-derived figures, with the handshake played out:
   self-acceptance refused, exceptions stored without editing a
   figure, supersession, and every run record byte-identical
-  throughout).
-  Gate: ≥ 95%. Current: **69/69**.
+  throughout), and the template-governance case (a template's
+  lifecycle played against staged runs — authored words standing
+  in draft and drafting nothing, self-promotion refused by name,
+  the promoted words serving, the effectiveness figures decaying
+  past the review margin over the retirement floor until the
+  watch proposes retirement, the due template still serving, a
+  named retirement ending its drafting, and an edit on a live
+  template dropping it back to draft at a bumped version).
+  Gate: ≥ 95%. Current: **70/70**.
 - **Calibration pack** (`evals/run_calibration.py`) — the headline
   eval for a decision system: reliability bins and Brier scores per
   question against the golden truths. Verify Briers ≤ 0.013, category
@@ -644,6 +651,67 @@ itself used — the population evidence beside the one run.
 Golden G64–G65 pin the arithmetic (hand-counted), the withheld
 rates, the unknown-template accounting, and the firewall.
 
+## Template governance: a template earns its way live, and can lose the job
+
+Effectiveness grades the templates; nothing above gave anyone
+a governed way to act on the grade. The words themselves lived
+in code — shipped live by default, changed only by editing the
+package, retired never. Governance (`template_governance.py`)
+makes each template a record with a lifecycle, while changing
+nothing about *when* templates may be used — the safest-slice
+rule and the never-send discipline are exactly as they were;
+this governs *which* templates may serve, never the boundary:
+
+- **Bundled by default, governed on first act.** With no record
+  stored, a template stands at its bundled default — live,
+  version 1, the wording as shipped. The first governance act on
+  a name stores the record, and from then on the record *is* the
+  template. States run **draft → live → retired**; selection
+  gains exactly one check at its one existing place — a template
+  that is not live is not selected, and the run's trace says so
+  in its own words (`template draft: skipped — template … is
+  draft (not live); no draft offered`), the same slot reopen runs
+  have always used to explain a withheld draft.
+- **Words are authored, never edited in place.** Authoring and
+  editing are named-editor acts with the reason recorded on the
+  record's append-only history; the version bumps on every edit,
+  and editing a *live* template returns it to draft — the words
+  an approver let serve never change silently underneath them.
+  Selection reads a snapshot stamped at intake, so an act lands
+  on the next run, never mid-run, and every run record carries
+  the version its draft was written under (`template_version` on
+  the draft, and in the audit export beside the track record).
+- **Going live takes a second pair of eyes.** Promotion is a
+  named approver's act, and the approver may not be the author
+  of the version being promoted — self-promotion is refused by
+  name (the handoff rule: nobody signs their own page). For a
+  new template the cited basis is the approver's stated reason;
+  the act rides the history either way.
+- **Retirement is proposed by the numbers, decided by a person.**
+  The watch reuses the effectiveness report verbatim: a live
+  template whose `needs_review` flag stands over at least **10**
+  outcome-bearing uses (twice the 5-use floor a rate becomes
+  quotable at — retirement has consequences a flag does not) is
+  flagged **retirement-due** on the template and the desk
+  surfaces. A proposal is not an act: the due template *keeps
+  serving* — its flag was earned on population evidence while
+  each individual draft still lands inside guardrails that keep
+  a human on every send — until a named editor retires it, with
+  a reason. Retired is terminal; there is no un-retire, and the
+  record and its history stay readable.
+
+Surfaces: `GET /api/templates` (the registry with each
+template's effectiveness and retirement verdict, the authored
+constants riding along), per-template views and the four acts
+(`POST /api/templates`, `…/edit`, `…/promote`, `…/retire`) on
+the API, and a Templates tab on the console. Golden G70 plays
+the full lifecycle: authored words wait in draft, self-promotion
+is refused, the promoted words serve, the figures decay past
+the margin over the floor, the due template still serves, a
+named retirement ends its drafting, and an edit on a live
+template takes it off the shelf until re-promoted — with every
+run record byte-identical across it all.
+
 ## Incident clustering: the outage is twenty tickets wearing twenty names
 
 Everything above looks at one ticket, or at one customer's
@@ -905,6 +973,7 @@ src/support_triage/
   incidents.py    incident clustering: computed proposals, stored acts, membership overlay
   watch.py        the breach watch: open runs ranked by the code clock; band constants
   handoffs.py     the shift handoff: the desk's views composed into one page, and its handshake
+  template_governance.py  the template lifecycle: governed records, the acts, the retirement watch
   dossier.py      the customer dossier: history, flags, the context block
   compare.py      one ticket under several backends, diffed, unqueued
   sla.py          the deterministic SLA clock (band targets vs age)
@@ -917,7 +986,7 @@ src/support_triage/
   checkpoints.py  LangGraph saver selection (Postgres / memory)
   api.py          FastAPI transport; demo.py / cli.py the other surfaces
 evals/            golden.jsonl + the two runners
-migrations/       0001 records · 0002 pgvector embeddings · 0003 outcomes + run errors · 0004 review samples + verdicts · 0005 incidents + cluster dismissals · 0006 handoffs
+migrations/       0001 records · 0002 pgvector embeddings · 0003 outcomes + run errors · 0004 review samples + verdicts · 0005 incidents + cluster dismissals · 0006 handoffs · 0007 templates
 tests/            the hermetic suite (pytest)
 ```
 
