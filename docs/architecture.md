@@ -816,6 +816,67 @@ reader later asks "how close was this run when we exported
 it?", and the honest answer is a recomputation, not a stored
 claim.
 
+## The shift handoff
+
+`handoffs.py` exists because the desk's views, however honest
+individually, are four places — and a shift change is one
+conversation. The design follows from two decisions.
+
+**Composition is selection, not analysis.** Every section of
+the page is a source view's own output, selected and counted:
+the watch payload's counts verbatim and its first rows under
+an authored cap; the incident views' member counts and the
+proposal scan's pending list; the queue rows grouped by the
+clock states `queue_summary` already computed for them; the
+review samples' drawn-minus-verdicted accounting. The one
+figure that did not exist before — the QA backlog — is not new
+arithmetic either: it is the sample record's own two numbers
+(run_ids, verdicted runs) subtracted, per sample, the same
+accounting the sample's view already reports separately. The
+composition boundary is what keeps the page honest over time:
+a handoff can be wrong only if a view it cites is wrong, and
+then the view is the bug, for every reader at once — never a
+fifth, forked computation drifting from the other four. The
+suite pins this rather than trusting it: the composed sections
+are asserted equal to the views recomputed independently at
+the same instant, and the golden case asserts the numbers a
+human derives from the staged desk by hand. The figures are
+frozen on the record at the stated boundary (`as_of`) because
+a handoff is a document about a moment — the desk it describes
+no longer exists an hour later, and a page that quietly
+recomputed itself would be a different page from the one the
+incoming lead signed.
+
+**The handshake is testimony, like a verdict.** The round-8
+review discipline — a grade is a named person's statement,
+final once given — is the shape the acceptance takes. The
+page is addressed, not public: only the named incoming lead
+can accept it, its author is refused by name (a page you wrote
+is not a page you received), and a second acceptance is a
+conflict rather than an edit. Exceptions are the interesting
+case: an acceptor who disputes a figure does not get to change
+it — the figure is the source view's, and editing it on the
+page would forge the view — so the dispute rides as text
+beside the figures, which is where disagreements between two
+leads belong: on the record, attributable, and inert.
+Supersession handles the stale page the same way incidents
+handle a moved queue: the newer page lapses the older one's
+claim to be current without deleting it, so the history of
+what was handed over, when, and what became of it is complete.
+
+Storage follows the human-act precedent: handoffs are their
+own table (migration 0006), not an overlay on any run — there
+is no run a shift change belongs to — and acceptance and
+supersession update the handoff's own row, the way an
+incident's row carries its closure. The run audit export is
+deliberately untouched: the export's contract is one run's
+story, and desk state is not part of it (the export already
+carries the one desk-flavoured annotation that IS about the
+run — its watch band at export time). No events are published
+and no webhooks fire: the watch round's precedent holds — the
+bus subscribers contracted for run events, and a lead opening
+the handoff tab is the reader the page is written for.
+
 ## Events, comparisons, and SLA clocks
 
 **The event bus** (`events.py: EventBus`, owned by the service) is

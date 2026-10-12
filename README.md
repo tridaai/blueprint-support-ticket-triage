@@ -108,7 +108,7 @@ Or natively, offline, in about a minute:
 uv sync --extra dev        # or, without uv: make install-pip
 make demo                  # one ticket, traced end to end
 make test                  # 357 tests
-make evals                 # golden routing 68/68 · calibration gates pass
+make evals                 # golden routing 69/69 · calibration gates pass
 make serve                 # API + console on :8000
 ```
 
@@ -184,8 +184,14 @@ Two packs, both deterministic offline:
   order and bands hand-derived from each run's own target, the
   clock outranking the model's risk on the planted pair, and the
   lead's reassignment pinned as an overlay with the clock
-  unmoved).
-  Gate: ≥ 95%. Current: **68/68**.
+  unmoved), and the shift-handoff case (a staged desk at a fixed
+  boundary — a confirmed cluster, a breached outage, grading
+  owed — whose composed page is asserted section by section
+  against hand-derived figures, with the handshake played out:
+  self-acceptance refused, exceptions stored without editing a
+  figure, supersession, and every run record byte-identical
+  throughout).
+  Gate: ≥ 95%. Current: **69/69**.
 - **Calibration pack** (`evals/run_calibration.py`) — the headline
   eval for a decision system: reliability bins and Brier scores per
   question against the golden truths. Verify Briers ≤ 0.013, category
@@ -744,6 +750,56 @@ and no webhook events — the watch is a view a lead opens, not
 a stream subscribers contracted for. Golden G68 pins the whole
 round.
 
+## The shift handoff: one page, two signatures
+
+Support runs around the clock, and at shift change the desk's
+state lives in four places at once — the breach watch, the
+incidents, the queue, the QA backlog — plus whatever the
+outgoing lead remembers to mention. The shift handoff
+(`handoffs.py`) is the one page the handover is about: composed
+in code at a stated shift boundary, signed over by the two
+leads it passes between.
+
+- **Composed from the desk's own views, and nothing else.** The
+  watch section is the watch's own band counts and its top rows
+  under an authored cap (five, printed on the payload); the
+  incidents section reads the stored open incidents and the
+  live proposal scan (how many proposals wait, the first
+  named); the queues section groups the queue view's own rows
+  by the SLA clock states those rows already carry; the QA
+  section is the review records' own accounting — drawn minus
+  verdicted, per sample, is the grading still owed. No section
+  recomputes anything, and the suite pins the page equal to the
+  source views at the same instant, field by field. The one
+  human-authored part is the outgoing lead's note.
+- **The handshake is the record.** A handoff names an outgoing
+  and an incoming lead — two different people, or it is refused.
+  It stands *outstanding* until the addressed lead accepts it:
+  acceptance by its own author is refused by name
+  (self-acceptance), and so is acceptance by anyone else. The
+  acceptor may accept *with exceptions* — free text naming what
+  they dispute — which rides the record beside the figures and
+  edits none of them. A newer handoff supersedes an unaccepted
+  older one (the older stays on record, lapsed, and can no
+  longer be accepted), so at most one page ever waits on its
+  signature. The figures are frozen at composition; the
+  acceptance changes only the handshake fields.
+- **Desk-level, and it moves no triage.** Handoffs live in
+  their own store table (migration 0006); no run record
+  changes, in any field, because a handoff was created,
+  accepted, or superseded — the suite pins run records
+  byte-identical across the whole lifecycle. The run audit
+  export does not carry them: an export is a document about
+  one run, and a shift page is not part of a run's story.
+
+Surfaces: a Shift handoff tab in the console (compose form,
+the current page with its sections and accept controls, the
+history), `POST /api/handoffs`, `GET /api/handoffs` (the
+outstanding page singled out), `GET /api/handoffs/{id}`,
+`POST /api/handoffs/{id}/accept`. No CLI and no events — the
+handoff is a page a lead opens, not a stream. Golden G69 pins
+the whole round.
+
 ## Batch, compare, similar tickets, SLA clocks, events, webhooks
 
 The operations surface around the pipeline:
@@ -848,6 +904,7 @@ src/support_triage/
   reviews.py      QA review: the seeded sampler, verdicts, agreement report, inter-rater kappa
   incidents.py    incident clustering: computed proposals, stored acts, membership overlay
   watch.py        the breach watch: open runs ranked by the code clock; band constants
+  handoffs.py     the shift handoff: the desk's views composed into one page, and its handshake
   dossier.py      the customer dossier: history, flags, the context block
   compare.py      one ticket under several backends, diffed, unqueued
   sla.py          the deterministic SLA clock (band targets vs age)
@@ -860,7 +917,7 @@ src/support_triage/
   checkpoints.py  LangGraph saver selection (Postgres / memory)
   api.py          FastAPI transport; demo.py / cli.py the other surfaces
 evals/            golden.jsonl + the two runners
-migrations/       0001 records · 0002 pgvector embeddings · 0003 outcomes + run errors · 0004 review samples + verdicts · 0005 incidents + cluster dismissals
+migrations/       0001 records · 0002 pgvector embeddings · 0003 outcomes + run errors · 0004 review samples + verdicts · 0005 incidents + cluster dismissals · 0006 handoffs
 tests/            the hermetic suite (pytest)
 ```
 
