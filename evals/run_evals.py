@@ -1,6 +1,6 @@
 """Golden routing eval: known tickets in, routing truth checked.
 
-Sixty-five synthetic tickets with authored expectations — category,
+Sixty-eight synthetic tickets with authored expectations — category,
 queue, priority band, and the five safety/engineering verify flags.
 (36 through round 2; round 3 added multi-issue tickets, three more
 injection phrasings, a calm ticket that must stay low, a repeat
@@ -40,7 +40,14 @@ one clean, one below the use floor with its rates withheld, and a
 pre-link record with an unnamed draft counted in the totals but
 attributed to no template), and a firewall case pinning that a
 flagged template's tickets compose byte-identically to a fresh
-service and still earn their draft.)
+service and still earn their draft; the breach-watch round added
+the watch cases — a staged queue at a fixed instant whose ranked
+order and bands are hand-derived from each run's own SLA target,
+a plain run outranking a feared outage purely on the clock (the
+model's sla_breach_risk shown, never sorted by), the gate-note
+assignee read off the watch, and the lead's reassignment asserted
+as an overlay: the record byte-identical apart from its
+assignment trail, the clock unmoved, the refusals named.)
 Each case runs the full pipeline (screen → duplicate → one decision
 call → composition → guardrails) through a fresh service, on the
 deterministic offline backend by default, so the gate is hermetic:
@@ -1209,6 +1216,214 @@ def check_incident_case(service: TriageService, case: dict) -> list[str]:
     return failures
 
 
+def check_watch_case(service: TriageService, case: dict) -> list[str]:
+    """A breach-watch case (watch.py).
+
+    Seeds a staged queue whose received_at stamps are authored,
+    then reads the watch at the case's fixed instant: the ranked
+    order, the bands and the counts are hand-derived from each
+    run's own SLA target (band premise asserted per seed, so a
+    staging drift names itself), the model's risk is asserted to
+    rank OPPOSITE the clock on the planted pair, and the lead's
+    acts play out under the overlay discipline — a reassignment
+    may change nothing on any record but the target's assignment
+    trail, and no run's clock reading may move.
+    """
+    from support_triage.sla import format_timestamp, parse_timestamp, sla_clock
+
+    failures: list[str] = []
+    now = parse_timestamp(case["watch_now"])
+    if now is None:
+        return [f"watch_now {case['watch_now']!r} does not parse"]
+
+    for entry in case.get("watch_seed", []):
+        ticket = TicketInput.model_validate(entry["ticket"])
+        result = service.run_ticket(ticket).result
+        wanted_band = entry.get("expect_band")
+        if wanted_band and result.composition.priority_band != wanted_band:
+            failures.append(
+                f"{ticket.ticket_id}: premise broken — decided band "
+                f"{result.composition.priority_band!r}, expected "
+                f"{wanted_band!r}; the watch judgement would prove nothing"
+            )
+
+    def snapshot() -> dict:
+        return {
+            record.ticket_id: record.model_dump()
+            for record in service.store.all_records()
+        }
+
+    def clocks() -> dict:
+        return {
+            record.ticket_id: sla_clock(record, now)
+            for record in service.store.all_records()
+        }
+
+    state = {"records": snapshot(), "clocks": clocks()}
+
+    def records_intact(label: str, *, trail_for: str | None = None) -> None:
+        current = snapshot()
+        for ticket_id, before in state["records"].items():
+            after = current.get(ticket_id)
+            if after is None:
+                failures.append(f"{label}: run {ticket_id} vanished")
+                continue
+            if ticket_id == trail_for:
+                after = {**after, "assignments": before["assignments"]}
+            if after != before:
+                failures.append(
+                    f"{label}: run {ticket_id}'s record changed — the "
+                    "watch reads and the reassignment overlays; neither "
+                    "rewrites a run"
+                )
+        state["records"] = current
+
+    def clocks_unmoved(label: str) -> None:
+        current = clocks()
+        if current != state["clocks"]:
+            failures.append(
+                f"{label}: an SLA clock reading moved — a reassignment "
+                "never buys a run more time"
+            )
+        state["clocks"] = current
+
+    for index, action in enumerate(case.get("watch_actions", [])):
+        kind = action["type"]
+        label = f"action {index} ({kind})"
+        expect_error = action.get("expect_error")
+        try:
+            if kind == "assign":
+                service.assign(
+                    action["ticket"], action["assignee"],
+                    by=action.get("by", "eval-gate"),
+                )
+                state["records"] = snapshot()
+                state["clocks"] = clocks()
+            elif kind == "decide":
+                service.record_decision(
+                    action["ticket"], action.get("decision", "approved"),
+                    by=action.get("by", "eval-agent"),
+                )
+                state["records"] = snapshot()
+                state["clocks"] = clocks()
+            elif kind == "reassign":
+                record = service.reassign_run(
+                    action["ticket"],
+                    assignee=action.get("assignee", ""),
+                    by=action.get("by", ""),
+                    reason=action.get("reason", ""),
+                    now=now,
+                )
+                entry = record.assignments[-1] if record.assignments else None
+                if entry is None:
+                    failures.append(f"{label}: no assignment entry was appended")
+                else:
+                    if entry.assignee != action.get("assignee"):
+                        failures.append(
+                            f"{label}: trail names {entry.assignee!r}, "
+                            f"expected {action.get('assignee')!r}"
+                        )
+                    if entry.by != action.get("by"):
+                        failures.append(
+                            f"{label}: trail lead {entry.by!r}, "
+                            f"expected {action.get('by')!r}"
+                        )
+                    if entry.reason != action.get("reason"):
+                        failures.append(
+                            f"{label}: trail reason {entry.reason!r}, "
+                            f"expected {action.get('reason')!r}"
+                        )
+                    if entry.at != format_timestamp(now):
+                        failures.append(
+                            f"{label}: trail stamped {entry.at!r}, "
+                            f"expected the watch instant {format_timestamp(now)!r}"
+                        )
+                records_intact(label, trail_for=action["ticket"])
+                clocks_unmoved(label)
+            elif kind == "watch":
+                payload = service.breach_watch(now)
+                rows = payload["rows"]
+                got_order = [row["ticket_id"] for row in rows]
+                if "expect_order" in action and got_order != action["expect_order"]:
+                    failures.append(
+                        f"{label}: order {got_order}, expected "
+                        f"{action['expect_order']}"
+                    )
+                by_id = {row["ticket_id"]: row for row in rows}
+                for ticket_id, band in (action.get("expect_bands") or {}).items():
+                    row = by_id.get(ticket_id)
+                    if row is None:
+                        failures.append(f"{label}: {ticket_id} missing from the watch")
+                    elif row["watch_band"] != band:
+                        failures.append(
+                            f"{label}: {ticket_id} band {row['watch_band']!r}, "
+                            f"expected {band!r}"
+                        )
+                for key, wanted in (action.get("expect_counts") or {}).items():
+                    if payload["counts"].get(key) != wanted:
+                        failures.append(
+                            f"{label}: count {key} = {payload['counts'].get(key)}, "
+                            f"expected {wanted}"
+                        )
+                if "expect_open" in action and payload["open_runs"] != action["expect_open"]:
+                    failures.append(
+                        f"{label}: open_runs {payload['open_runs']}, "
+                        f"expected {action['expect_open']}"
+                    )
+                for ticket_id, who in (action.get("expect_assignee") or {}).items():
+                    row = by_id.get(ticket_id)
+                    if row is None:
+                        failures.append(f"{label}: {ticket_id} missing from the watch")
+                        continue
+                    if row["assignee"] != who["agent"]:
+                        failures.append(
+                            f"{label}: {ticket_id} assignee {row['assignee']!r}, "
+                            f"expected {who['agent']!r}"
+                        )
+                    if row["assignee_source"] != who["source"]:
+                        failures.append(
+                            f"{label}: {ticket_id} assignee source "
+                            f"{row['assignee_source']!r}, expected {who['source']!r}"
+                        )
+                pair = action.get("risk_ranks_opposite")
+                if pair:
+                    first, second = pair
+                    one, two = by_id.get(first), by_id.get(second)
+                    if one is None or two is None:
+                        failures.append(f"{label}: risk pair {pair} not both on the watch")
+                    else:
+                        if not one["sla_breach_risk"] < two["sla_breach_risk"]:
+                            failures.append(
+                                f"{label}: premise broken — the model's risk "
+                                f"does not disagree with the clock on {pair} "
+                                f"({one['sla_breach_risk']} vs "
+                                f"{two['sla_breach_risk']})"
+                            )
+                        if got_order.index(first) > got_order.index(second):
+                            failures.append(
+                                f"{label}: {first} ranks behind {second} — "
+                                "the watch followed the model's risk, "
+                                "not the clock"
+                            )
+                records_intact(label)
+                clocks_unmoved(label)
+            else:
+                failures.append(f"{label}: unknown watch action {kind!r}")
+        except Exception as exc:  # a refusal is a ValueError/KeyError by design
+            if not (expect_error and expect_error in str(exc)):
+                failures.append(f"{label}: raised unexpectedly: {exc}")
+            else:
+                records_intact(label)
+                clocks_unmoved(label)
+        else:
+            if expect_error:
+                failures.append(
+                    f"{label}: should have been refused ({expect_error!r}) "
+                    "but succeeded"
+                )
+    return failures
+
+
 def main() -> int:
     cases = load_cases()
     service = fresh_service()
@@ -1219,6 +1434,8 @@ def main() -> int:
         # only a case's own `previous` ticket may link to it.
         if "template_seed" in case:
             failures = check_template_case(fresh_service(), case)
+        elif "watch_seed" in case:
+            failures = check_watch_case(fresh_service(), case)
         elif "incident_seed" in case:
             failures = check_incident_case(fresh_service(), case)
         elif "qa_sample" in case:
