@@ -41,6 +41,14 @@ never to the graph directly. The service:
   overlay that never writes to a member run's record), dismissals
   (the member-set watermark), per-ticket addition decisions, and
   closure, which leaves every member's own flow exactly as it was.
+- hands the shift over (handoffs.py): composes one page per shift
+  change from the desk's own views — the watch's counts and top
+  rows, the open incidents and pending proposals, the per-queue
+  SLA pressure, the QA backlog — plus the outgoing lead's note,
+  and stores the handshake over it: the addressed incoming lead
+  accepts, plainly or with exceptions, or a newer page supersedes
+  the unaccepted one. A handoff record lives in its own table and
+  touches no run.
 """
 
 from __future__ import annotations
@@ -52,7 +60,7 @@ from datetime import datetime, timezone
 from langgraph.types import Command
 from pydantic import ValidationError
 
-from . import corrections, dossier, incidents, playbooks, threads, webhooks, workbench
+from . import corrections, dossier, handoffs, incidents, playbooks, threads, webhooks, workbench
 from .composition import reopen_limit_in_force
 from .events import CollectingSink, EventBus, RunEvent
 from .graph import AgentRun, build_graph
@@ -66,6 +74,7 @@ from .schemas import (
     IncidentMember,
     ReviewSample,
     ReviewVerdict,
+    ShiftHandoff,
     ThreadCorrection,
     TicketInput,
     TicketResult,
@@ -1940,6 +1949,176 @@ class TriageService:
         if not memberships:
             return None
         return {"memberships": memberships}
+
+    # -- shift handoffs (composition + the handshake) ------------------------
+
+    def create_handoff(
+        self,
+        *,
+        from_lead: str,
+        to_lead: str,
+        note: str = "",
+        as_of: datetime | None = None,
+        now: datetime | None = None,
+    ) -> ShiftHandoff:
+        """Compose and store one shift handoff (handoffs.py).
+
+        The figures are composed at the stated shift boundary
+        (``as_of``; the creation moment when unstated) from the
+        desk's own views at that instant — the breach watch, the
+        proposal scan, the open incidents' views, the queue rows,
+        the review records — so the page is exactly the views it
+        cites, frozen at the boundary. The outgoing lead's note is
+        the only human-authored part.
+
+        Creating supersedes every still-outstanding handoff: the
+        older page stays on record with its status lapsed, and at
+        most one handoff ever waits on its handshake. No run
+        record is opened for writing, and nothing is published —
+        a handoff is a page a lead opens, not a run event.
+        ``now`` is injectable, the house idiom, so the golden pack
+        pins the whole lifecycle at a fixed instant.
+        """
+        from_lead = (from_lead or "").strip()
+        to_lead = (to_lead or "").strip()
+        if not from_lead:
+            raise handoffs.HandoffError(
+                "from_lead is required — a handoff names the outgoing "
+                "lead handing the shift over"
+            )
+        if not to_lead:
+            raise handoffs.HandoffError(
+                "to_lead is required — a handoff names the incoming "
+                "lead it is addressed to"
+            )
+        if from_lead == to_lead:
+            raise handoffs.HandoffError(
+                f"a handoff goes between two leads — {from_lead!r} "
+                "cannot hand a shift to themselves; there would be "
+                "no second signature to receive it"
+            )
+        moment = now or datetime.now(timezone.utc)
+        boundary = as_of or moment
+        records_by_id = {r.ticket_id: r for r in self.store.all_records()}
+        open_views = [
+            incidents.incident_view(incident, records_by_id, boundary)
+            for incident in self.store.all_incidents()
+            if incident.status == "open"
+        ]
+        sections = handoffs.compose_sections(
+            watch=self.breach_watch(boundary),
+            cluster_payload=self.cluster_proposals(),
+            incident_views=open_views,
+            queue_rows=self.store.queue_summary(now=boundary),
+            samples=self.store.all_review_samples(),
+            verdicts=self.store.all_review_verdicts(),
+        )
+        existing = self.store.all_handoffs()
+        handoff = ShiftHandoff(
+            handoff_id=f"HOF-{len(existing) + 1:04d}",
+            from_lead=from_lead,
+            to_lead=to_lead,
+            as_of=format_timestamp(boundary),
+            created_at=format_timestamp(moment),
+            note=(note or "").strip(),
+            sections=sections,
+            status="outstanding",
+        )
+        for older in existing:
+            if older.status == "outstanding":
+                older.status = "superseded"
+                self.store.save_handoff(older)
+        self.store.save_handoff(handoff)
+        return handoff
+
+    def accept_handoff(
+        self,
+        handoff_id: str,
+        *,
+        actor: str,
+        exceptions: str = "",
+        now: datetime | None = None,
+    ) -> ShiftHandoff:
+        """Accept one outstanding handoff, as its addressed lead.
+
+        The handshake's rules are the record's: the acceptor must
+        be the lead the page is addressed to — its author is
+        refused by name (self-acceptance) and so is any third
+        party — and the page must still stand outstanding (an
+        accepted page is testimony, a superseded one has lapsed).
+        Exceptions are free text naming what the acceptor disputes;
+        they ride the record beside the figures and edit none of
+        them.
+        """
+        actor = (actor or "").strip()
+        if not actor:
+            raise handoffs.HandoffError(
+                "actor is required — accepting a handoff names the "
+                "lead taking the shift"
+            )
+        handoff = self._handoff_or_raise(handoff_id)
+        if handoff.status == "accepted":
+            raise handoffs.HandoffConflict(
+                f"handoff {handoff_id} was already accepted by "
+                f"{handoff.accepted_by} — an acceptance is testimony, "
+                "not a draft that can be signed twice"
+            )
+        if handoff.status == "superseded":
+            raise handoffs.HandoffConflict(
+                f"handoff {handoff_id} was superseded by a newer "
+                "handoff — accept the current page, not the lapsed one"
+            )
+        if actor == handoff.from_lead:
+            raise handoffs.HandoffError(
+                f"{actor} wrote handoff {handoff_id} — a handoff is "
+                "accepted by the incoming lead it is addressed to, "
+                "never by its own author (self-acceptance)"
+            )
+        if actor != handoff.to_lead:
+            raise handoffs.HandoffError(
+                f"handoff {handoff_id} is addressed to "
+                f"{handoff.to_lead} — {actor} cannot accept it on "
+                "their behalf"
+            )
+        exceptions = (exceptions or "").strip()
+        handoff.status = "accepted"
+        handoff.accepted_by = actor
+        handoff.accepted_at = format_timestamp(now or datetime.now(timezone.utc))
+        handoff.acceptance = (
+            "accepted_with_exceptions" if exceptions else "accepted"
+        )
+        handoff.exceptions = exceptions
+        self.store.save_handoff(handoff)
+        return handoff
+
+    def _handoff_or_raise(self, handoff_id: str) -> ShiftHandoff:
+        for handoff in self.store.all_handoffs():
+            if handoff.handoff_id == handoff_id:
+                return handoff
+        raise KeyError(f"unknown handoff {handoff_id!r}")
+
+    def list_handoffs(self) -> list[dict]:
+        """Every handoff, the outstanding page first, then newest
+        first — the console's history and the outstanding state in
+        one read."""
+        views = [
+            handoffs.handoff_view(handoff) for handoff in self.store.all_handoffs()
+        ]
+        views.sort(key=lambda view: view["handoff_id"], reverse=True)
+        views.sort(key=lambda view: view["status"] != "outstanding")
+        return views
+
+    def get_handoff(self, handoff_id: str) -> dict:
+        """One handoff's page, as stored."""
+        return handoffs.handoff_view(self._handoff_or_raise(handoff_id))
+
+    def outstanding_handoff(self) -> dict | None:
+        """The handoff still waiting on its handshake, or None —
+        at most one ever stands outstanding (creation supersedes)."""
+        for handoff in self.store.all_handoffs():
+            if handoff.status == "outstanding":
+                return handoffs.handoff_view(handoff)
+        return None
 
     # -- policy replay + audit export (reads over the records) --------------
 
