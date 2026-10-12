@@ -1371,6 +1371,39 @@ class ReassignRequest(BaseModel):
     reason: str = ""  # why the run changes hands
 
 
+@app.get("/api/attainment")
+def sla_attainment(start: str, end: str):
+    """SLA attainment for a period: the report the desk sends upward.
+
+    ``start`` and ``end`` are ISO timestamps; the period is
+    [start, end). The population is the decisions that landed in
+    the period, per queue × priority band: judged met/breached by
+    the code SLA clock's arithmetic at the decision moment, with
+    median and worst decision times, still-open runs as an
+    open-at-end snapshot, and the report's data boundary on its
+    face — decided runs whose moment was never recorded belong to
+    no period and are counted, never placed. An unparseable bound
+    or an end at/before the start is a 422 naming it.
+    """
+    from .sla import parse_timestamp
+
+    start_at = parse_timestamp(start)
+    if start_at is None:
+        raise HTTPException(
+            status_code=422, detail=f"start {start!r} is not a parseable timestamp"
+        )
+    end_at = parse_timestamp(end)
+    if end_at is None:
+        raise HTTPException(
+            status_code=422, detail=f"end {end!r} is not a parseable timestamp"
+        )
+    if end_at <= start_at:
+        raise HTTPException(
+            status_code=422, detail="end must be after start — the period is [start, end)"
+        )
+    return get_service().sla_attainment(start_at, end_at)
+
+
 @app.get("/api/watch")
 def breach_watch():
     """The duty view: open runs ranked by the code SLA clock.

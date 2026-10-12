@@ -111,6 +111,7 @@
   <button id="tab-watch">Breach watch</button>
   <button id="tab-handoff">Shift handoff</button>
   <button id="tab-templates">Templates</button>
+  <button id="tab-attainment">SLA attainment</button>
 </nav>
 
 <main id="view-console">
@@ -431,6 +432,22 @@
       <button id="tpl-retire">Retire</button>
     </div>
     <div id="tpl-history" style="margin-top:12px"></div>
+  </section>
+</main>
+
+<main id="view-attainment" style="display:none; grid-template-columns:1fr">
+  <section>
+    <h2>SLA attainment — the period the desk reports upward</h2>
+    <p class="note">The population is the <strong>decisions that landed in the period</strong>, whenever the tickets arrived — attainment measures the desk's completed work in the window. Each decision is judged by the <strong>code SLA clock's</strong> arithmetic at the moment it landed: breached when the clock would have read breached at that instant, met otherwise. Only judged decisions divide — a decided run with no clock start on record is counted <strong>unjudgeable</strong>, never silently met — and an empty cell reports no percentage, never 100%. Runs still open are not in the population; they appear as the <strong>open-at-end</strong> snapshot. Decisions recorded before the decision moment was stamped belong to no period: the report counts them on its face as its data boundary.</p>
+    <div class="row">
+      <label for="att-start">Period start</label>
+      <input type="datetime-local" id="att-start">
+      <label for="att-end">Period end (exclusive)</label>
+      <input type="datetime-local" id="att-end">
+      <button id="att-load" class="primary">Build report</button>
+      <span class="note" id="att-status"></span>
+    </div>
+    <div id="att-report" class="empty" style="margin-top:14px">Pick a period and build the report.</div>
   </section>
 </main>
 
@@ -1874,6 +1891,7 @@ function showView(name) {
   $('view-watch').style.display = name === 'watch' ? '' : 'none';
   $('view-handoff').style.display = name === 'handoff' ? '' : 'none';
   $('view-templates').style.display = name === 'templates' ? '' : 'none';
+  $('view-attainment').style.display = name === 'attainment' ? '' : 'none';
   $('tab-console').classList.toggle('active', name === 'console');
   $('tab-dashboards').classList.toggle('active', name === 'dashboards');
   $('tab-compare').classList.toggle('active', name === 'compare');
@@ -1883,6 +1901,7 @@ function showView(name) {
   $('tab-watch').classList.toggle('active', name === 'watch');
   $('tab-handoff').classList.toggle('active', name === 'handoff');
   $('tab-templates').classList.toggle('active', name === 'templates');
+  $('tab-attainment').classList.toggle('active', name === 'attainment');
   if (name === 'dashboards' && !dashboardsLoaded) loadDashboards();
   if (name === 'compare' && !$('cmp-json').value) $('cmp-json').value = $('json').value;
   if (name === 'threads') loadThreads();
@@ -1901,6 +1920,57 @@ $('tab-incidents').onclick = () => showView('incidents');
 $('tab-watch').onclick = () => showView('watch');
 $('tab-handoff').onclick = () => showView('handoff');
 $('tab-templates').onclick = () => showView('templates');
+$('tab-attainment').onclick = () => showView('attainment');
+$('att-load').onclick = loadAttainment;
+
+// ---------------------------------------------------------------- SLA attainment
+function attCellHtml(c) {
+  const pct = c.attainment_pct === null ? '—' : c.attainment_pct.toFixed(1) + '%';
+  const med = c.median_seconds === null ? '—' : (c.median_seconds / 3600).toFixed(2) + 'h';
+  const worst = c.worst_seconds === null ? '—' : (c.worst_seconds / 3600).toFixed(2) + 'h';
+  return `<td>${c.decided}</td><td>${c.met}</td><td>${c.breached}</td><td>${c.unjudgeable}</td><td>${pct}</td><td>${med}</td><td>${worst}</td>`;
+}
+async function loadAttainment() {
+  const box = $('att-report');
+  const status = $('att-status');
+  const startVal = $('att-start').value, endVal = $('att-end').value;
+  if (!startVal || !endVal) { status.textContent = 'Both bounds are required.'; return; }
+  const start = new Date(startVal).toISOString(), end = new Date(endVal).toISOString();
+  status.textContent = 'Building…';
+  try {
+    const res = await fetch(`/api/attainment?start=${encodeURIComponent(start)}&end=${encodeURIComponent(end)}`, {headers: headers()});
+    const data = await res.json();
+    if (!res.ok) { status.textContent = data.detail || 'Report unavailable.'; return; }
+    status.textContent = '';
+    const bands = Object.keys(data.targets_hours);
+    let html = `<p class="note">Period ${esc(data.period.start)} → ${esc(data.period.end)} (${esc(data.period.rule)}). ${esc(data.population_rule)}</p>`;
+    html += `<p class="note">Boundary: ${data.boundary.decided_without_stamp} decided run(s) carry no recorded decision moment and belong to no period. ${esc(data.boundary.note)}</p>`;
+    if (!data.queues.length) {
+      html += '<p class="empty">No decisions landed in this period and nothing stood open at its end.</p>';
+    }
+    for (const q of data.queues) {
+      html += `<h3 style="margin:16px 0 6px">${esc(q.queue)}</h3><table><tr><th>Band</th><th>Target</th><th>Decided</th><th>Met</th><th>Breached</th><th>Unjudgeable</th><th>Attainment</th><th>Median decision time</th><th>Worst</th></tr>`;
+      for (const b of bands) {
+        html += `<tr><td>${bandPill(b)}</td><td>${data.targets_hours[b]}h</td>${attCellHtml(q.bands[b])}</tr>`;
+      }
+      html += `<tr><td colspan="2"><strong>Queue total</strong></td>${attCellHtml(q.totals)}</tr></table>`;
+    }
+    html += `<h3 style="margin:16px 0 6px">All queues</h3><table><tr><th></th><th></th><th>Decided</th><th>Met</th><th>Breached</th><th>Unjudgeable</th><th>Attainment</th><th>Median decision time</th><th>Worst</th></tr><tr><td colspan="2"><strong>Total</strong></td>${attCellHtml(data.totals)}</tr></table>`;
+    if (data.unjudgeable.length) {
+      html += `<h3 style="margin:16px 0 6px">Unjudgeable decisions</h3>` + data.unjudgeable.map(u => `<p class="note">${esc(u.ticket_id)} — ${esc(u.reason)}</p>`).join('');
+    }
+    const open = data.open_at_end;
+    html += `<h3 style="margin:16px 0 6px">Open at period end — ${open.total} run(s)</h3><p class="note">${esc(open.note)}. ${open.unclocked_open_at_end} open run(s) have no parseable arrival and are counted unclocked, not placed.</p>`;
+    if (open.rows.length) {
+      html += '<table><tr><th>Queue</th><th>Band</th><th>Open</th><th>ok</th><th>due soon</th><th>breached</th><th>Tickets</th></tr>' +
+        open.rows.map(r => `<tr><td>${esc(r.queue)}</td><td>${bandPill(r.band)}</td><td>${r.open}</td><td>${r.states.ok}</td><td>${r.states.due_soon}</td><td>${r.states.breached}</td><td>${r.ticket_ids.map(esc).join(', ')}</td></tr>`).join('') + '</table>';
+    }
+    box.innerHTML = html;
+    box.classList.remove('empty');
+  } catch (e) {
+    status.textContent = 'Report unavailable.';
+  }
+}
 $('dash-refresh').onclick = loadDashboards;
 
 // ---------------------------------------------------------------- policy
