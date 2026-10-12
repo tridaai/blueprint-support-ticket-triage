@@ -754,6 +754,68 @@ bus as the run lifecycle; the webhook set is unchanged, because
 a gate webhook subscriber contracted for run events, not for a
 lead's grouping decisions.
 
+## The breach watch
+
+`watch.py` is a pure read model with exactly one stored act,
+and its shape follows from the two facts it must never blur.
+
+**The clock ranks; the model is displayed.** The SLA section
+below keeps two things apart — the code clock and the model's
+`sla_breach_risk` — and the watch is where that separation
+becomes operational: a duty lead scans one ranked list, and
+the list is ordered by seconds-to-breach from `sla_clock`
+alone. The model's risk rides each row because a lead deserves
+to see the disagreement (the golden pack plants a pair the two
+orderings place in opposite order, and pins that the watch
+follows the clock), but it is read from the stored answers into
+a display field and touches no sort key, band, or filter. The
+bands are absolute distance to breach (`breached`,
+`due_within_1h`, `due_within_4h`, `later`) rather than the
+clock's fractional states, because the lead's question is
+wall-clock ("what breaches this hour?"), not proportional
+("what is in its last quarter?") — a low-band run can be
+`due_soon` for eighteen hours. Both readings ride each row so
+neither impersonates the other. Ties on the clock break by the
+priority score: the queue's own ordering, reused rather than
+replaced, because the watch is a second lens on the same
+queue, not a rival queue.
+
+**One reading rule for "whose is this?"** Assignment had two
+write paths before the watch existed: the gate's
+`[assigned to …]` note appended to `decision_reason`, and the
+assignment module's suggestions reading those notes. The
+watch's reassignment adds a third — a structured, append-only
+trail on the record (`assignments`: assignee, lead, reason,
+time) — so `assignment.current_assignee` is the single
+resolver every surface uses, trail first, notes second. The
+trail is structured rather than another note because the act
+has required parts the note idiom cannot enforce: a bare
+`assign` accepts an empty `by` and no reason at all, and a
+duty act that moves work between people must name all three
+or be refused. Load counting in the suggestion scorer reads
+through the same resolver, so a reassignment moves the load
+figures with it — there is no second copy of the truth for
+the surfaces to disagree over.
+
+**The act moves people, never time.** `reassign_run` appends
+one trail entry and saves; every other field of the record is
+untouched, which the suite pins byte-for-byte, and the clock
+reading is pinned identical across the act — `received_at` is
+intake's fact, and letting a reassignment reset it would let
+the duty roster quietly refinance breaches. No migration was
+needed: run records persist as JSON payloads, and the trail
+is one more overlay field with an empty default, the same way
+the corrections and playbook overlays landed. The watch
+publishes no events and fires no webhooks, on the incident
+round's precedent: the bus subscribers contracted for run
+events, and a lead's staffing act is not one. The audit export
+carries the run's band computed at export time — a
+point-in-time annotation handed in like the drift context,
+labelled with its moment — because an export is where a
+reader later asks "how close was this run when we exported
+it?", and the honest answer is a recomputation, not a stored
+claim.
+
 ## Events, comparisons, and SLA clocks
 
 **The event bus** (`events.py: EventBus`, owned by the service) is

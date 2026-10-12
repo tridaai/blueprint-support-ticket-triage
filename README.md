@@ -107,8 +107,8 @@ Or natively, offline, in about a minute:
 ```bash
 uv sync --extra dev        # or, without uv: make install-pip
 make demo                  # one ticket, traced end to end
-make test                  # 339 tests
-make evals                 # golden routing 67/67 · calibration gates pass
+make test                  # 357 tests
+make evals                 # golden routing 68/68 · calibration gates pass
 make serve                 # API + console on :8000
 ```
 
@@ -179,8 +179,13 @@ Two packs, both deterministic offline:
   hand-counted outcomes — one template flagged, one clean, one
   below the use floor, a pre-link record counted but never
   attributed — and a firewall case pinning that a flagged template
-  changes no composition and suppresses no draft).
-  Gate: ≥ 95%. Current: **67/67**.
+  changes no composition and suppresses no draft), and the
+  breach-watch case (a staged queue at a fixed instant: ranked
+  order and bands hand-derived from each run's own target, the
+  clock outranking the model's risk on the planted pair, and the
+  lead's reassignment pinned as an overlay with the clock
+  unmoved).
+  Gate: ≥ 95%. Current: **68/68**.
 - **Calibration pack** (`evals/run_calibration.py`) — the headline
   eval for a decision system: reliability bins and Brier scores per
   question against the golden truths. Verify Briers ≤ 0.013, category
@@ -691,6 +696,54 @@ export for member runs. Golden G66–G67 pin the proposal rule
 (exact member set; a same-area different-category group and a
 below-floor group propose nothing) and the whole lifecycle.
 
+## The breach watch: the queue, ranked by the clock
+
+The SLA clock exists per ticket, and the dashboards count its
+states — but a lead watching forty open runs still cannot see
+which three breach in the next hour and whose they are. The
+breach watch (`watch.py`) is that duty view: a pure read model
+over the open runs, recomputed on every read.
+
+- **Ranked by the code clock, never the model's risk.** Each
+  run's time-to-breach comes from the SLA clock — its own
+  priority band's target (critical 1h, high 4h, medium 24h, low
+  72h) minus its age. The model's `sla_breach_risk` judgement
+  rides each row, labelled, for the lead's eye; it never sorts,
+  bands, or filters anything. Golden G68 plants the disagreement
+  — a plain billing run with 30 minutes of clock left outranks
+  an outage the model fears more — and the watch follows the
+  clock.
+- **Bands are absolute distance to breach**, printed on the
+  payload: `breached`, `due_within_1h` (one hour is the critical
+  band's whole target), `due_within_4h` (the high band's
+  target), `later`. They are deliberately not the clock's own
+  states: `due_soon` is the last quarter of each band's own
+  target, so a low run is due soon with 18 hours left and still
+  `later` here; each row carries both readings. Breached runs
+  rank first (most overdue first), then nearest breach; ties
+  break by the composition priority score — the queue's own
+  ordering — then ticket id. Open runs with no parseable
+  `received_at` are counted as unclocked and never ranked on a
+  guessed clock.
+- **The lead's one act is reassignment.** A row carries the
+  run's current assignee (one reading rule: the watch's
+  assignment trail first, the gate's `[assigned to …]` note
+  second) and the roster suggestion. Reassigning requires a
+  named lead, a reason, and the new assignee — all three, or the
+  act is refused by name — and appends one entry to the run's
+  assignment trail on its record. Nothing auto-reassigns, no
+  priority changes, and the clock never moves: the record is
+  byte-identical apart from the trail, so a reassignment cannot
+  buy a run more time.
+
+Surfaces: a Breach watch tab in the console (ranked rows, the
+band counts, the reassign act), `GET /api/watch`, `POST
+/api/runs/{id}/reassign`, and a band-at-export-time block in
+the run audit export for runs whose clock is running. No CLI
+and no webhook events — the watch is a view a lead opens, not
+a stream subscribers contracted for. Golden G68 pins the whole
+round.
+
 ## Batch, compare, similar tickets, SLA clocks, events, webhooks
 
 The operations surface around the pipeline:
@@ -794,6 +847,7 @@ src/support_triage/
   workbench.py    resolution knowledge, the working-note composer, refusals
   reviews.py      QA review: the seeded sampler, verdicts, agreement report, inter-rater kappa
   incidents.py    incident clustering: computed proposals, stored acts, membership overlay
+  watch.py        the breach watch: open runs ranked by the code clock; band constants
   dossier.py      the customer dossier: history, flags, the context block
   compare.py      one ticket under several backends, diffed, unqueued
   sla.py          the deterministic SLA clock (band targets vs age)
