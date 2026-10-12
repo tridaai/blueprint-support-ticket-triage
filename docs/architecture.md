@@ -998,6 +998,23 @@ target) / breached. The clock takes `now` as a parameter everywhere
 so its tests are exact; it never consults the model, and the
 model's risk answer never moves a target.
 
+**Period reporting reuses the one arithmetic.** The attainment
+report (`attainment.py`) judges a past decision by the clock
+reading at its moment: `sla_reading_at` is `sla.py`'s single
+computation factored out of the live clock, so a decision is
+breached exactly when the clock would have read breached as it
+landed — there is no second formula to drift. That required the
+decision's moment to exist: records always kept `received_at`
+(the clock's start) and the decision itself, but nothing stamped
+when the agent decided, so breach timing for decided runs was
+unrecoverable from the record. The service now stamps
+`decided_at` at the gate (the stamp rides the resume payload, so
+the graph path and the post-restart direct path write the same
+moment); the field rides the record's JSONB payload, so no
+migration was needed. Decisions from before the stamp belong to
+no period, and the report counts them on its face as its data
+boundary rather than placing them on a guessed date.
+
 ## What the agent will never do
 
 - **Send anything to a customer.** No node in the graph has that

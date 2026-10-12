@@ -23,10 +23,14 @@ def _load(name: str):
 def test_golden_cases_all_pass_the_pipeline_checks():
     runner = _load("run_evals")
     cases = runner.load_cases()
-    assert len(cases) == 70
+    assert len(cases) == 71
     failures = {}
     for case in cases:
-        if "template_gov_seed" in case:
+        if "attainment_seed" in case:
+            case_failures = runner.check_attainment_case(
+                runner.fresh_service(), case
+            )
+        elif "template_gov_seed" in case:
             case_failures = runner.check_template_governance_case(
                 runner.fresh_service(), case
             )

@@ -107,8 +107,8 @@ Or natively, offline, in about a minute:
 ```bash
 uv sync --extra dev        # or, without uv: make install-pip
 make demo                  # one ticket, traced end to end
-make test                  # 390 tests
-make evals                 # golden routing 70/70 · calibration gates pass
+make test                  # 403 tests
+make evals                 # golden routing 71/71 · calibration gates pass
 make serve                 # API + console on :8000
 ```
 
@@ -198,7 +198,7 @@ Two packs, both deterministic offline:
   watch proposes retirement, the due template still serving, a
   named retirement ending its drafting, and an edit on a live
   template dropping it back to draft at a bumped version).
-  Gate: ≥ 95%. Current: **70/70**.
+  Gate: ≥ 95%. Current: **71/71**.
 - **Calibration pack** (`evals/run_calibration.py`) — the headline
   eval for a decision system: reliability bins and Brier scores per
   question against the golden truths. Verify Briers ≤ 0.013, category
@@ -818,6 +818,58 @@ and no webhook events — the watch is a view a lead opens, not
 a stream subscribers contracted for. Golden G68 pins the whole
 round.
 
+## SLA attainment: the period report, with honest denominators
+
+The breach watch works the live queue; it cannot answer the
+question the desk reports upward — *last month, what share of
+the tickets we decided met their SLA, per queue and band, and
+how long did decisions take?* The attainment report
+(`attainment.py`) is that period view: a pure read model over
+the stored runs for a stated period, `[start, end)`, the rule
+printed on its face.
+
+- **The population is decisions, not arrivals.** A run belongs
+  to the period its decision landed in, whenever the ticket
+  arrived — attainment measures the desk's completed work in
+  the window. Each decision is judged by the code SLA clock's
+  own arithmetic at the decision moment (`sla_reading_at`, the
+  one computation behind the live clock and the watch): the
+  decision breached when the clock would have read breached at
+  the instant it landed, and met otherwise. Per queue × priority
+  band the report gives decided / met / breached counts, the
+  attainment percentage, and the median and worst
+  time-to-decision behind it. Runs still open are never counted
+  as met or breached; they appear as an **open-at-period-end**
+  snapshot (clock states at `end`), which read at the period
+  end is exactly the breach watch's population — the suite
+  pins that agreement, so the two views cannot fork.
+- **Honest denominators.** Only judged decisions divide. A
+  decided run with no parseable `received_at` had no clock
+  start on record: it is counted **unjudgeable** by name in its
+  cell, never silently met, never dropped, and kept out of the
+  percentage. A cell with no judged decisions reports no
+  percentage at all — empty is empty, never 100%.
+- **The boundary is printed, not hidden.** Decisions record
+  their moment (`decided_at`, stamped by the service at the
+  gate) only from this round on; the record always kept *what*
+  was decided and *by whom*, but not *when*. Decisions from
+  before the stamp belong to no period — the report counts
+  them on its face (`decided_without_stamp`) so the size of
+  the blind spot is itself a reported number, and nothing
+  back-fills a plausible date for them.
+
+Surfaces: an SLA attainment tab in the console (period picker,
+per-queue tables, the open-at-end snapshot) and
+`GET /api/attainment?start=…&end=…` (an unparseable bound, or
+an end at/before the start, is a 422 naming it). The audit
+export and the shift handoff are untouched — attainment
+history accumulates in the report, not in the per-run
+artifact. No CLI and no webhook events, the watch's precedent.
+Golden G71 pins the round: a staged June with hand-derived
+figures across two queues and two bands, the boundary and
+unjudgeable counts, the watch agreement, and one live gate
+decision carrying its stamp into the totals.
+
 ## The shift handoff: one page, two signatures
 
 Support runs around the clock, and at shift change the desk's
@@ -972,6 +1024,7 @@ src/support_triage/
   reviews.py      QA review: the seeded sampler, verdicts, agreement report, inter-rater kappa
   incidents.py    incident clustering: computed proposals, stored acts, membership overlay
   watch.py        the breach watch: open runs ranked by the code clock; band constants
+  attainment.py   SLA attainment: the period report over decided_at, judged by the clock
   handoffs.py     the shift handoff: the desk's views composed into one page, and its handshake
   template_governance.py  the template lifecycle: governed records, the acts, the retirement watch
   dossier.py      the customer dossier: history, flags, the context block

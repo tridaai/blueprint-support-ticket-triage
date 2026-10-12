@@ -92,7 +92,7 @@ from support_triage.backends import OfflineDecisionEngine  # noqa: E402
 from support_triage.embeddings import HashingEmbedder, InMemoryVectorIndex  # noqa: E402
 from support_triage.livecal import live_calibration, live_samples  # noqa: E402
 from support_triage.objectstore import InMemoryObjectStore  # noqa: E402
-from support_triage.schemas import AgentOutcome, TicketInput  # noqa: E402
+from support_triage.schemas import AgentOutcome, TicketInput, TicketResult  # noqa: E402
 from support_triage.service import TriageService  # noqa: E402
 from support_triage.stats import overview_stats  # noqa: E402
 from support_triage.store import InMemoryStore  # noqa: E402
@@ -1919,6 +1919,158 @@ def check_template_governance_case(service, case: dict) -> list[str]:
     return failures
 
 
+def check_attainment_case(service: TriageService, case: dict) -> list[str]:
+    """An SLA attainment case (attainment.py).
+
+    Seeds a staged month of records directly into the store —
+    the report is a read model over records, and its figures are
+    hand-derived in the case — plus one live run decided through
+    the gate at a stated instant, so the decided_at stamp itself
+    is under test. The composition pin plays first, while the
+    staged July decision has not landed: read at the period end,
+    the report's open-at-end snapshot and the breach watch are
+    the same population — same runs, same bands, same clock
+    states. The July decision then lands on its record, and the
+    full report is judged: the run joins no June cell (decisions
+    are the population key), yet still stands in June's
+    open-at-end snapshot.
+    """
+    from support_triage.attainment import build_attainment
+    from support_triage.sla import parse_timestamp
+    from support_triage.watch import build_watch
+
+    failures: list[str] = []
+    period = case["attainment_period"]
+    start = parse_timestamp(period["start"])
+    end = parse_timestamp(period["end"])
+    if start is None or end is None:
+        return ["attainment_period bounds do not parse"]
+
+    pending = case.get("attainment_pending_decision")
+    for entry in case.get("attainment_seed", []):
+        record = TicketResult.model_validate(entry)
+        if pending and record.ticket_id == pending["ticket_id"]:
+            record.status = "awaiting_agent"
+            record.decided_at = ""
+        service.store.save(record)
+
+    live = case.get("attainment_live")
+    live_record = None
+    if live:
+        ticket = TicketInput.model_validate(live["ticket"])
+        live_record = service.run_ticket(ticket).result
+        if live_record.composition.queue != live["expect_queue"]:
+            failures.append(
+                f"premise broken — the live ticket composed to queue "
+                f"{live_record.composition.queue!r}, expected "
+                f"{live['expect_queue']!r}; the hand-derived totals would prove nothing"
+            )
+        service.record_decision(
+            live_record.ticket_id,
+            "approved",
+            by="eval-agent",
+            now=parse_timestamp(live["decide_at"]),
+        )
+        live_record = service.get_record(live_record.ticket_id)
+        if live_record.decided_at != live["decide_at"]:
+            failures.append(
+                f"the gate decision carries decided_at {live_record.decided_at!r}, "
+                f"expected the stamped {live['decide_at']!r}"
+            )
+
+    # The composition pin, played while the staged July decision
+    # has not landed: same open population, same bands, same
+    # clock states, same unclocked count.
+    records = service.store.all_records()
+    report = build_attainment(records, start, end)
+    watch = build_watch(records, [], end)
+    snapshot_ids: dict[str, set] = {}
+    snapshot_states: dict[str, str] = {}
+    for row in report["open_at_end"]["rows"]:
+        snapshot_ids.setdefault(row["band"], set()).update(row["ticket_ids"])
+        (state,) = [s for s, n in row["states"].items() if n]
+        for ticket_id in row["ticket_ids"]:
+            snapshot_states[ticket_id] = state
+    watch_ids: dict[str, set] = {}
+    for row in watch["rows"]:
+        watch_ids.setdefault(row["priority_band"], set()).add(row["ticket_id"])
+    if snapshot_ids != watch_ids:
+        failures.append(
+            f"composition broken — the open-at-end population {snapshot_ids} "
+            f"disagrees with the breach watch's {watch_ids}"
+        )
+    for row in watch["rows"]:
+        if snapshot_states.get(row["ticket_id"]) != row["sla_state"]:
+            failures.append(
+                f"{row['ticket_id']}: snapshot state "
+                f"{snapshot_states.get(row['ticket_id'])!r} != the watch's "
+                f"{row['sla_state']!r}"
+            )
+    if report["open_at_end"]["unclocked_open_at_end"] != watch["unclocked_open"]:
+        failures.append("the unclocked open counts disagree with the watch's")
+
+    # The July decision lands; the full report is judged.
+    if pending:
+        record = service.get_record(pending["ticket_id"])
+        record.status = "triaged"
+        record.decision = "approved"
+        record.decided_at = pending["decided_at"]
+        service.store.save(record)
+        report = build_attainment(service.store.all_records(), start, end)
+
+    expect = case["attainment_expect"]
+    if report["boundary"]["decided_without_stamp"] != expect["boundary_without_stamp"]:
+        failures.append(
+            f"boundary decided_without_stamp "
+            f"{report['boundary']['decided_without_stamp']}, expected "
+            f"{expect['boundary_without_stamp']}"
+        )
+    for key, wanted in expect["totals"].items():
+        if report["totals"][key] != wanted:
+            failures.append(
+                f"totals {key} = {report['totals'][key]}, expected {wanted}"
+            )
+    blocks = {block["queue"]: block for block in report["queues"]}
+    for label, wanted_cell in expect["cells"].items():
+        queue, band = label.split("/")
+        cell = blocks.get(queue, {}).get("bands", {}).get(band)
+        if cell is None:
+            failures.append(f"cell {label} missing from the report")
+            continue
+        for key, wanted in wanted_cell.items():
+            if cell[key] != wanted:
+                failures.append(f"cell {label} {key} = {cell[key]}, expected {wanted}")
+    unjudgeable_ids = [u["ticket_id"] for u in report["unjudgeable"]]
+    if unjudgeable_ids != expect["unjudgeable_ids"]:
+        failures.append(
+            f"unjudgeable {unjudgeable_ids}, expected {expect['unjudgeable_ids']}"
+        )
+    open_rows = {
+        f"{row['queue']}/{row['band']}": row for row in report["open_at_end"]["rows"]
+    }
+    for label, wanted_row in expect["open_rows"].items():
+        row = open_rows.get(label)
+        if row is None:
+            failures.append(f"open row {label} missing from the snapshot")
+            continue
+        if row["ticket_ids"] != wanted_row["ticket_ids"]:
+            failures.append(
+                f"open row {label} tickets {row['ticket_ids']}, "
+                f"expected {wanted_row['ticket_ids']}"
+            )
+        if row["states"] != wanted_row["states"]:
+            failures.append(
+                f"open row {label} states {row['states']}, "
+                f"expected {wanted_row['states']}"
+            )
+    if report["open_at_end"]["total"] != expect["open_total"]:
+        failures.append(
+            f"open total {report['open_at_end']['total']}, "
+            f"expected {expect['open_total']}"
+        )
+    return failures
+
+
 def main() -> int:
     cases = load_cases()
     service = fresh_service()
@@ -1927,7 +2079,9 @@ def main() -> int:
     for case in cases:
         # A fresh service per case keeps the duplicate index honest:
         # only a case's own `previous` ticket may link to it.
-        if "template_gov_seed" in case:
+        if "attainment_seed" in case:
+            failures = check_attainment_case(fresh_service(), case)
+        elif "template_gov_seed" in case:
             failures = check_template_governance_case(fresh_service(), case)
         elif "template_seed" in case:
             failures = check_template_case(fresh_service(), case)
