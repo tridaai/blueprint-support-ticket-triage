@@ -22,7 +22,13 @@ a named agent. **Nothing is ever sent to a customer by this system.**
 > synthetic. The TypeSafe (Jev) adapter targets an early-access API —
 > see *Honest status* below.
 
-> **Work in progress** — this blueprint is built and passing its automated test and eval gates, but it has not yet finished hands-on local testing, and its companion blog post is not yet published. Expect changes. This notice comes off when both are done.
+<p align="center">
+  <a href="https://trida.ai/blog/support-ticket-triage-agent-blueprint">
+    <img src="https://geeytzpdwvjojoie.public.blob.vercel-storage.com/blog/1791813173071-cover.webp" alt="Support Ticket Triage Agent Blueprint" width="600">
+  </a>
+</p>
+
+**Deep-dive:** [Support Ticket Triage Agent Blueprint](https://trida.ai/blog/support-ticket-triage-agent-blueprint) — how the agent works, where it stops, and what the evals actually prove.
 
 <p align="center">
   <img alt="Python 3.10–3.12" src="https://img.shields.io/badge/python-3.10--3.12-4F46E5">
