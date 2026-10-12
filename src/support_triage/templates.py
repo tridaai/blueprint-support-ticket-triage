@@ -20,6 +20,34 @@ from .decisions import DecisionSet
 from .guardrails import GuardrailOutcome
 from .schemas import DraftInfo
 
+# The version the bundled wording stands at. A governed record
+# (template_governance.py) carries its own version, bumped on every
+# edit; drafts written from the bundled wording are stamped with
+# this one, so "version 1" always names the words as shipped.
+BUNDLED_VERSION = 1
+
+
+def template_name(area: str) -> str:
+    """The name a draft for ``area`` carries on its run — the one
+    template family, keyed by product area."""
+    return f"how_to_first_response[{area}]"
+
+
+def template_areas() -> list[str]:
+    """The product areas the bundled family covers."""
+    return list(_AREA_GUIDES)
+
+
+def bundled_text() -> str:
+    """The bundled draft body (the wording as shipped)."""
+    return _TEMPLATE
+
+
+def bundled_guide(area: str) -> str:
+    """The bundled guide pointer for ``area``."""
+    return _AREA_GUIDES.get(area, _AREA_GUIDES["other"])
+
+
 # Product area -> where the documented answer lives. A deployment
 # points these at its own help centre; the wording is a template, not
 # generated text.
