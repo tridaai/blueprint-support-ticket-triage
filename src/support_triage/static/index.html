@@ -109,6 +109,7 @@
   <button id="tab-qa">QA review</button>
   <button id="tab-incidents">Incidents</button>
   <button id="tab-watch">Breach watch</button>
+  <button id="tab-handoff">Shift handoff</button>
 </nav>
 
 <main id="view-console">
@@ -374,6 +375,28 @@
     </div>
     <div id="watch-counts" class="empty" style="margin-top:14px">Loading…</div>
     <div id="watch-rows" class="empty" style="margin-top:10px">Loading…</div>
+  </section>
+</main>
+
+<main id="view-handoff" style="display:none; grid-template-columns:1fr">
+  <section>
+    <h2>Shift handoff — one page, two signatures</h2>
+    <p class="note">At a shift change the outgoing lead composes one page from the desk's own views — the breach watch's counts and top rows, the open incidents and the proposals waiting on a lead, the per-queue SLA pressure, the QA review backlog — plus their own note, the only words on the page a human wrote. The figures are the source views' own, frozen at the stated boundary; nothing here recomputes them. The page stands <strong>outstanding</strong> until the lead it is addressed to accepts it — plainly, or <strong>with exceptions</strong> naming what they dispute. Exceptions ride beside the figures and edit none of them. The author cannot accept their own page, and a newer handoff supersedes an unaccepted older one, which stays on record as lapsed.</p>
+    <div class="row">
+      <label for="hof-from">Outgoing lead</label>
+      <input type="text" id="hof-from" placeholder="e.g. L. Lead">
+      <label for="hof-to">Incoming lead</label>
+      <input type="text" id="hof-to" placeholder="e.g. M. Lead">
+      <button id="hof-create" class="primary">Compose handoff</button>
+      <button id="hof-refresh">Refresh</button>
+      <span class="note" id="hof-status"></span>
+    </div>
+    <label for="hof-note" style="margin-top:10px">Outgoing lead's note (the only human-authored part of the page)</label>
+    <textarea id="hof-note" spellcheck="false" style="min-height:54px" placeholder="What the next lead should know that the figures don't say…"></textarea>
+    <div id="hof-outstanding" style="margin-top:14px"></div>
+    <div id="hof-page" class="empty" style="margin-top:10px">Loading…</div>
+    <h2 style="margin-top:18px">History</h2>
+    <div id="hof-history" class="empty">Loading…</div>
   </section>
 </main>
 
@@ -1219,6 +1242,140 @@ async function loadWatch() {
 }
 $('watch-refresh').onclick = loadWatch;
 
+// ---------------------------------------------------------------- shift handoff
+function handoffStatusPill(h) {
+  if (h.status === 'accepted') return pill(h.acceptance === 'accepted_with_exceptions' ? 'accepted · with exceptions' : 'accepted', 'good');
+  if (h.status === 'superseded') return pill('superseded', '');
+  return pill('outstanding — awaiting acceptance', 'warn');
+}
+
+function renderHandoffPage(h) {
+  const s = h.sections || {};
+  const w = s.watch || {};
+  const wc = w.counts || {};
+  const inc = s.incidents || {};
+  const q = s.queues || {};
+  const qa = s.qa_review || {};
+  const topRows = (w.top_rows || []).map(r => {
+    const left = r.seconds_to_breach < 0
+      ? `<span class="flag">${fmtDuration(r.seconds_to_breach)} over</span>`
+      : fmtDuration(r.seconds_to_breach) + ' left';
+    return `<tr><td>${esc(r.ticket_id)}<br><span class="note">${esc(r.subject || '')}</span></td><td>${watchBandPill(r.watch_band)}</td><td>${left}</td><td>${esc(r.queue)}</td><td>${esc(r.assignee || '') || '<span class="note">unassigned</span>'}</td></tr>`;
+  }).join('');
+  const openInc = (inc.open || []).map(i => `<tr><td>${esc(i.incident_id)}</td><td>${esc(i.title)}</td><td>${i.member_count} member(s) · ${i.open_members} still open</td></tr>`).join('');
+  const queueRows = (q.rows || []).map(r => `<tr><td>${esc(r.queue)}</td><td>${r.open}</td><td>${r.breached}</td><td>${r.due_soon}</td><td>${r.ok}</td></tr>`).join('');
+  const qaSamples = (qa.per_sample || []).map(p => `<tr><td>${esc(p.sample_id)}</td><td>${p.drawn}</td><td>${p.verdicted}</td><td>${p.backlog}</td></tr>`).join('');
+  let handshake = '';
+  if (h.status === 'accepted') {
+    handshake = `<p style="margin:10px 0 0">Accepted by <strong>${esc(h.accepted_by)}</strong> at ${esc(h.accepted_at)}${h.acceptance === 'accepted_with_exceptions' ? ` — <strong>with exceptions:</strong> ${esc(h.exceptions)}` : ' — no exceptions.'}</p>`;
+  } else if (h.status === 'superseded') {
+    handshake = `<p class="note" style="margin:10px 0 0">Superseded by a newer handoff — this page is lapsed and can no longer be accepted.</p>`;
+  } else {
+    handshake = `<div class="row" style="margin-top:10px">
+      <label for="hof-actor">Accepting lead</label>
+      <input type="text" id="hof-actor" placeholder="${esc(h.to_lead)}">
+      <button id="hof-accept" class="primary">Accept</button>
+      <button id="hof-accept-exc">Accept with exceptions</button>
+      <span class="note" id="hof-accept-status"></span>
+    </div>
+    <label for="hof-exceptions" style="margin-top:8px">Exceptions (what you dispute — recorded beside the figures, changing none of them)</label>
+    <textarea id="hof-exceptions" spellcheck="false" style="min-height:44px"></textarea>`;
+  }
+  return `<p style="margin:0"><strong>${esc(h.handoff_id)}</strong> · ${esc(h.from_lead)} → ${esc(h.to_lead)} · composed at ${esc(h.as_of)} · ${handoffStatusPill(h)}</p>
+    ${h.note ? `<p style="margin:8px 0 0"><em>Note from ${esc(h.from_lead)}:</em> ${esc(h.note)}</p>` : ''}
+    ${handshake}
+    <h3 style="margin:16px 0 6px">Breach watch <span class="note">(${esc((w.source || '').split('—')[0].trim())})</span></h3>
+    <p style="margin:0">${watchBandPill('breached')} ${wc.breached || 0} &nbsp; ${watchBandPill('due_within_1h')} ${wc.due_within_1h || 0} &nbsp; ${watchBandPill('due_within_4h')} ${wc.due_within_4h || 0} &nbsp; ${watchBandPill('later')} ${wc.later || 0} &nbsp; <span class="note">${w.open_runs || 0} open run(s)${w.unclocked_open ? `, ${w.unclocked_open} unclocked` : ''} · top ${((w.top_rows || []).length)} of ${w.rows_total || 0} ranked rows</span></p>
+    ${topRows ? `<table><tr><th>Ticket</th><th>Watch band</th><th>To breach</th><th>Queue</th><th>Assignee</th></tr>${topRows}</table>` : '<p class="note">Nothing is waiting at the gate.</p>'}
+    <h3 style="margin:16px 0 6px">Incidents</h3>
+    <p style="margin:0" class="note">${inc.open_count || 0} open incident(s) · ${inc.proposals_pending || 0} cluster proposal(s) awaiting a lead${inc.top_proposal ? ` — first: ${esc(inc.top_proposal.suggested_title)}` : ''}</p>
+    ${openInc ? `<table><tr><th>Incident</th><th>Title</th><th>Members</th></tr>${openInc}</table>` : ''}
+    <h3 style="margin:16px 0 6px">Queues under pressure</h3>
+    ${queueRows ? `<table><tr><th>Queue</th><th>Open</th><th>Breached</th><th>Due soon</th><th>OK</th></tr>${queueRows}</table>` : '<p class="note">No open runs in any queue.</p>'}
+    <h3 style="margin:16px 0 6px">QA review backlog</h3>
+    <p style="margin:0" class="note">${qa.backlog || 0} grading(s) owed over ${qa.samples || 0} sample(s) — ${qa.drawn_runs || 0} drawn, ${qa.verdicted_runs || 0} verdicted.</p>
+    ${qaSamples ? `<table><tr><th>Sample</th><th>Drawn</th><th>Verdicted</th><th>Backlog</th></tr>${qaSamples}</table>` : ''}`;
+}
+
+let handoffShownId = '';
+async function loadHandoffs(showId) {
+  const pageBox = $('hof-page');
+  const histBox = $('hof-history');
+  const outBox = $('hof-outstanding');
+  try {
+    const res = await fetch('/api/handoffs', {headers: headers()});
+    if (!res.ok) throw new Error('unavailable');
+    const data = await res.json();
+    const all = data.handoffs || [];
+    outBox.innerHTML = data.outstanding
+      ? `<p class="note" style="margin:0">One handoff is <strong>outstanding</strong>: ${esc(data.outstanding.handoff_id)} (${esc(data.outstanding.from_lead)} → ${esc(data.outstanding.to_lead)}), composed at ${esc(data.outstanding.as_of)} — it waits on ${esc(data.outstanding.to_lead)}'s acceptance.</p>`
+      : '<p class="note" style="margin:0">No handoff is outstanding — the last page was accepted, or none has been composed yet.</p>';
+    if (!all.length) {
+      pageBox.className = 'empty';
+      pageBox.textContent = 'No handoffs yet — compose the first one above.';
+      histBox.className = 'empty';
+      histBox.textContent = 'No history yet.';
+      return;
+    }
+    histBox.className = '';
+    histBox.innerHTML = `<table><tr><th>Handoff</th><th>From → to</th><th>Composed at</th><th>Status</th><th></th></tr>` +
+      all.map(h => `<tr><td>${esc(h.handoff_id)}</td><td>${esc(h.from_lead)} → ${esc(h.to_lead)}</td><td>${esc(h.as_of)}</td><td>${handoffStatusPill(h)}</td><td><button data-hof-view="${esc(h.handoff_id)}">View</button></td></tr>`).join('') + `</table>`;
+    histBox.querySelectorAll('[data-hof-view]').forEach(btn => btn.onclick = () => loadHandoffs(btn.dataset.hofView));
+    const wanted = showId || handoffShownId;
+    let current = all.find(h => h.handoff_id === wanted) || data.outstanding || all[0];
+    if (wanted && current.handoff_id !== wanted) {
+      const one = await fetch(`/api/handoffs/${encodeURIComponent(wanted)}`, {headers: headers()});
+      if (one.ok) current = await one.json();
+    }
+    handoffShownId = current.handoff_id;
+    pageBox.className = '';
+    pageBox.innerHTML = renderHandoffPage(current);
+    const acceptBtn = $('hof-accept');
+    if (acceptBtn) {
+      const wire = async (withExceptions) => {
+        const status = $('hof-accept-status');
+        const actor = ($('hof-actor').value || '').trim();
+        const exceptions = ($('hof-exceptions').value || '').trim();
+        if (!actor) { status.textContent = 'accepting names the lead taking the shift'; return; }
+        if (withExceptions && !exceptions) { status.textContent = 'accepting with exceptions names what you dispute — or accept plainly'; return; }
+        status.textContent = 'working…';
+        try {
+          const r = await fetch(`/api/handoffs/${encodeURIComponent(current.handoff_id)}/accept`, {method: 'POST', headers: headers(), body: JSON.stringify({actor, exceptions: withExceptions ? exceptions : ''})});
+          if (!r.ok) { const err = await r.json().catch(() => ({})); throw new Error(err.detail || r.statusText); }
+          handoffShownId = current.handoff_id;
+          await loadHandoffs(current.handoff_id);
+          $('hof-status').textContent = `accepted — ${current.handoff_id} is signed by ${actor}`;
+        } catch (e) { status.textContent = 'failed: ' + e.message; }
+      };
+      acceptBtn.onclick = () => wire(false);
+      $('hof-accept-exc').onclick = () => wire(true);
+    }
+  } catch (e) {
+    pageBox.className = 'empty';
+    pageBox.textContent = 'Handoffs unavailable.';
+    histBox.className = 'empty';
+    histBox.textContent = '';
+  }
+}
+$('hof-refresh').onclick = () => loadHandoffs();
+$('hof-create').onclick = async () => {
+  const status = $('hof-status');
+  const from_lead = ($('hof-from').value || '').trim();
+  const to_lead = ($('hof-to').value || '').trim();
+  const note = ($('hof-note').value || '').trim();
+  if (!from_lead || !to_lead) { status.textContent = 'a handoff names both leads — the one handing over and the one receiving'; return; }
+  status.textContent = 'working…';
+  try {
+    const res = await fetch('/api/handoffs', {method: 'POST', headers: headers(), body: JSON.stringify({from_lead, to_lead, note})});
+    if (!res.ok) { const err = await res.json().catch(() => ({})); throw new Error(err.detail || res.statusText); }
+    const h = await res.json();
+    handoffShownId = h.handoff_id;
+    $('hof-note').value = '';
+    await loadHandoffs(h.handoff_id);
+    status.textContent = `composed — ${h.handoff_id} is outstanding, addressed to ${h.to_lead}`;
+  } catch (e) { status.textContent = 'failed: ' + e.message; }
+};
+
 $('analyze').onclick = async () => {
   let ticket;
   try { ticket = JSON.parse($('json').value); }
@@ -1555,6 +1712,7 @@ function showView(name) {
   $('view-qa').style.display = name === 'qa' ? '' : 'none';
   $('view-incidents').style.display = name === 'incidents' ? '' : 'none';
   $('view-watch').style.display = name === 'watch' ? '' : 'none';
+  $('view-handoff').style.display = name === 'handoff' ? '' : 'none';
   $('tab-console').classList.toggle('active', name === 'console');
   $('tab-dashboards').classList.toggle('active', name === 'dashboards');
   $('tab-compare').classList.toggle('active', name === 'compare');
@@ -1562,12 +1720,14 @@ function showView(name) {
   $('tab-qa').classList.toggle('active', name === 'qa');
   $('tab-incidents').classList.toggle('active', name === 'incidents');
   $('tab-watch').classList.toggle('active', name === 'watch');
+  $('tab-handoff').classList.toggle('active', name === 'handoff');
   if (name === 'dashboards' && !dashboardsLoaded) loadDashboards();
   if (name === 'compare' && !$('cmp-json').value) $('cmp-json').value = $('json').value;
   if (name === 'threads') loadThreads();
   if (name === 'qa') loadQaSamples();
   if (name === 'incidents') loadIncidents();
   if (name === 'watch') loadWatch();
+  if (name === 'handoff') loadHandoffs();
 }
 $('tab-console').onclick = () => showView('console');
 $('tab-dashboards').onclick = () => showView('dashboards');
@@ -1576,6 +1736,7 @@ $('tab-threads').onclick = () => showView('threads');
 $('tab-qa').onclick = () => showView('qa');
 $('tab-incidents').onclick = () => showView('incidents');
 $('tab-watch').onclick = () => showView('watch');
+$('tab-handoff').onclick = () => showView('handoff');
 $('dash-refresh').onclick = loadDashboards;
 
 // ---------------------------------------------------------------- policy

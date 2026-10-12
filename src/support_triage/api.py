@@ -1600,3 +1600,113 @@ def close_incident(incident_id: str, body: IncidentCloseRequest, request: Reques
     except (KeyError, ValueError) as exc:
         _incident_http(exc)
     return incident.model_dump()
+
+
+# ---------------------------------------------------------------------------
+# shift handoffs (composed from the desk's views; the handshake stored)
+# ---------------------------------------------------------------------------
+
+
+class HandoffCreateRequest(BaseModel):
+    from_lead: str = ""  # the outgoing lead handing over
+    to_lead: str = ""  # the incoming lead the page is addressed to
+    note: str = ""  # the outgoing lead's free text — the only human-authored part
+    as_of: str = ""  # optional stated shift boundary (ISO); empty = now
+
+
+class HandoffAcceptRequest(BaseModel):
+    actor: str = ""  # the lead accepting — must be the addressed lead
+    exceptions: str = ""  # disputed items, verbatim; empty accepts plainly
+
+
+def _handoff_http(exc: Exception):
+    """Map a handoff refusal onto its status: KeyError → 404,
+    HandoffError → its own (409 conflict / 422 invalid)."""
+    from .handoffs import HandoffError
+
+    if isinstance(exc, KeyError):
+        raise HTTPException(status_code=404, detail=exc.args[0] if exc.args else str(exc))
+    if isinstance(exc, HandoffError):
+        raise HTTPException(status_code=exc.http_status, detail=str(exc))
+    raise exc
+
+
+@app.post("/api/handoffs", status_code=201)
+def create_handoff(body: HandoffCreateRequest, request: Request):
+    """Compose and store one shift handoff, from one lead to another.
+
+    The figures are composed at the stated boundary (``as_of``, or
+    now) from the desk's own views — the breach watch's counts and
+    top rows, the open incidents and pending proposals, the
+    per-queue SLA pressure, the QA review backlog — and frozen on
+    the record; the note is the outgoing lead's own words. Both
+    leads must be named and different, or the refusal says why.
+    Creating supersedes any still-outstanding handoff. The
+    response is the handoff record.
+    """
+    require_api_key(request)
+    from .sla import parse_timestamp
+
+    as_of = None
+    if body.as_of.strip():
+        as_of = parse_timestamp(body.as_of)
+        if as_of is None:
+            raise HTTPException(
+                status_code=422,
+                detail=f"as_of {body.as_of!r} does not parse as a timestamp",
+            )
+    try:
+        handoff = get_service().create_handoff(
+            from_lead=body.from_lead,
+            to_lead=body.to_lead,
+            note=body.note,
+            as_of=as_of,
+        )
+    except ValueError as exc:
+        _handoff_http(exc)
+    return handoff.model_dump()
+
+
+@app.get("/api/handoffs")
+def list_handoffs():
+    """Every handoff — the outstanding page first, then newest
+    first — plus the outstanding one on its own, or null: the
+    console's current state and history in one read."""
+    service = get_service()
+    return {
+        "handoffs": service.list_handoffs(),
+        "outstanding": service.outstanding_handoff(),
+    }
+
+
+@app.get("/api/handoffs/{handoff_id}")
+def get_handoff(handoff_id: str):
+    """One handoff's page, exactly as stored: the composed
+    sections and the handshake state over them."""
+    try:
+        return get_service().get_handoff(handoff_id)
+    except KeyError:
+        raise HTTPException(
+            status_code=404, detail=f"unknown handoff {handoff_id!r}"
+        )
+
+
+@app.post("/api/handoffs/{handoff_id}/accept")
+def accept_handoff(handoff_id: str, body: HandoffAcceptRequest, request: Request):
+    """Accept an outstanding handoff, as the lead it addresses.
+
+    Self-acceptance (the author signing their own page) and
+    third-party acceptance are refused by name; an already
+    accepted or superseded page is a 409. ``exceptions`` names
+    what the acceptor disputes — it rides the record beside the
+    figures and edits none of them. The response is the handoff
+    record with the acceptance on it.
+    """
+    require_api_key(request)
+    try:
+        handoff = get_service().accept_handoff(
+            handoff_id, actor=body.actor, exceptions=body.exceptions
+        )
+    except (KeyError, ValueError) as exc:
+        _handoff_http(exc)
+    return handoff.model_dump()
