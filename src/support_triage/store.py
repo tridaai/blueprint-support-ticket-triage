@@ -120,6 +120,24 @@ class StoreBase:
             for dismissal in self.__dict__.get("_cluster_dismissals", [])
         ]
 
+    # -- shift handoff records (handoffs.py) -------------------------------
+    # A handoff is a stored record of its own — one composed page
+    # per shift change, with the handshake over it. It is never
+    # part of a run's record (a shift change must not move a
+    # triage). Same arrangement as the incident records:
+    # process-local defaults for the doubles, PostgresStore
+    # persists them in the handoffs table (migration 0006).
+
+    def save_handoff(self, handoff) -> None:
+        log = self.__dict__.setdefault("_handoffs", {})
+        log[handoff.handoff_id] = handoff.model_copy(deep=True)
+
+    def all_handoffs(self) -> list:
+        return [
+            handoff.model_copy(deep=True)
+            for handoff in self.__dict__.get("_handoffs", {}).values()
+        ]
+
     def queue_summary(
         self, filters: dict | None = None, now: datetime | None = None
     ) -> list[dict]:
@@ -442,6 +460,30 @@ class PostgresStore(StoreBase):
                 cur.execute("SELECT payload FROM cluster_dismissals ORDER BY id")
                 rows = cur.fetchall()
         return [ClusterDismissal.model_validate(row[0]) for row in rows]
+
+    # -- shift handoff records: persisted in their own table (0006) --------
+
+    def save_handoff(self, handoff) -> None:
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO handoffs (handoff_id, payload)
+                    VALUES (%s, %s::jsonb)
+                    ON CONFLICT (handoff_id) DO UPDATE SET payload = EXCLUDED.payload
+                    """,
+                    (handoff.handoff_id, json.dumps(handoff.model_dump())),
+                )
+            conn.commit()
+
+    def all_handoffs(self) -> list:
+        from .schemas import ShiftHandoff
+
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT payload FROM handoffs ORDER BY handoff_id")
+                rows = cur.fetchall()
+        return [ShiftHandoff.model_validate(row[0]) for row in rows]
 
     def get(self, ticket_id: str) -> TicketResult | None:
         with self._connect() as conn:

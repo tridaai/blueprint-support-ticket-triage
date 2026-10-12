@@ -443,6 +443,43 @@ class ClusterDismissal(BaseModel):
         return frozenset(self.member_ticket_ids)
 
 
+class ShiftHandoff(BaseModel):
+    """One shift handoff between two named leads (handoffs.py).
+
+    The desk's state at a shift boundary, composed in code from
+    the desk's own views — the breach watch's band counts and top
+    rows, the open incidents and pending cluster proposals, the
+    per-queue SLA pressure, the QA review backlog — plus the one
+    part a human authors: the outgoing lead's note. The composed
+    figures live in ``sections`` exactly as the source views
+    computed them at ``as_of``; accepting the handoff never edits
+    them, and the acceptor's disputed items ride in
+    ``exceptions`` as text beside the figures, not over them.
+
+    A handoff is a stored record of its own, like a review sample
+    or an incident — it is not part of any run's record, and its
+    existence changes nothing about any run. Its lifecycle is the
+    handshake: ``outstanding`` from creation until the addressed
+    incoming lead accepts it (``accepted``, plainly or with
+    exceptions), or a newer handoff supersedes it
+    (``superseded`` — the record stays; only its claim to be the
+    current page lapses).
+    """
+
+    handoff_id: str
+    from_lead: str = ""  # the outgoing lead who composed it
+    to_lead: str = ""  # the incoming lead it is addressed to
+    as_of: str = ""  # the stated shift boundary the figures were composed at
+    created_at: str = ""  # ISO datetime, stamped by the service
+    note: str = ""  # the outgoing lead's free text — the only human-authored part
+    sections: dict = Field(default_factory=dict)  # composed figures, by section
+    status: str = "outstanding"  # outstanding | accepted | superseded
+    accepted_by: str = ""
+    accepted_at: str = ""  # ISO datetime, stamped by the service
+    acceptance: str = ""  # accepted | accepted_with_exceptions
+    exceptions: str = ""  # the acceptor's disputed items, verbatim
+
+
 class RunTelemetry(BaseModel):
     backend: str = ""
     model: str = ""
