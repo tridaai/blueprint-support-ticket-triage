@@ -595,6 +595,13 @@ class TicketResult(BaseModel):
     decision: str = ""  # agent decision once made: approved | rejected
     decision_by: str = ""
     decision_reason: str = ""
+    # When the decision landed, stamped by the service at decision
+    # time (attainment.py reads it). Before the stamp existed the
+    # record kept every fact of the decision except its moment, so
+    # decisions from that era carry "" here and belong to no
+    # attainment period — the report counts them as its boundary
+    # rather than guessing when they happened.
+    decided_at: str = ""
     outcome: Optional[AgentOutcome] = None  # agent's ground truth, once recorded
     reopen: Optional[ReopenInfo] = None  # set when this run reopens an earlier one
     # Customer history (dossier.py): what the customer's prior

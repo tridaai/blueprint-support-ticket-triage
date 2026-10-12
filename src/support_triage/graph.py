@@ -519,6 +519,14 @@ def build_graph(
                 f"{result.decision_reason} [assigned to {assignee}]".strip()
             )
         result.status = "triaged" if verdict == "approved" else "rejected"
+        # The decision's moment (attainment.py reads it). The
+        # service owns the stamp — it rides the resume payload so a
+        # caller that names the moment (tests, the golden pack)
+        # gets the same record either way the decision is applied;
+        # absent a payload stamp, the node's own wall clock stands.
+        result.decided_at = str(decision.get("decided_at", "")).strip() or (
+            format_timestamp(datetime.now(timezone.utc))
+        )
         return {
             "result": result.model_dump(),
             "_details": [

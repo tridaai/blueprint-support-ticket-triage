@@ -64,23 +64,20 @@ def format_timestamp(moment: datetime) -> str:
     return moment.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def sla_clock(record: TicketResult, now: datetime | None = None) -> dict | None:
-    """The SLA clock for one record, or ``None`` when it isn't running.
+def _reading(received: datetime, band: str, moment: datetime) -> dict | None:
+    """The clock's arithmetic at one moment, for one arrival + band.
 
-    Returns the state, the band's target, the ticket's age, and the
-    seconds left before breach (negative once breached).
+    The single computation behind every SLA reading in the system:
+    the live clock (:func:`sla_clock`), the breach watch, and the
+    attainment report's decision-moment judgements all read through
+    here, so a state named anywhere is the same arithmetic
+    everywhere.
     """
-    if record.status != "awaiting_agent":
-        return None
-    received = parse_timestamp(record.received_at)
-    if received is None:
-        return None
-    target_hours = SLA_TARGET_HOURS.get(record.composition.priority_band)
+    target_hours = SLA_TARGET_HOURS.get(band)
     if target_hours is None:  # pragma: no cover - bands are a closed set
         return None
-    now = now or datetime.now(timezone.utc)
     target_seconds = target_hours * 3600.0
-    age_seconds = (now - received).total_seconds()
+    age_seconds = (moment - received).total_seconds()
     remaining = target_seconds - age_seconds
     if remaining < 0:
         state = "breached"
@@ -97,3 +94,34 @@ def sla_clock(record: TicketResult, now: datetime | None = None) -> dict | None:
         "seconds_to_breach": round(remaining, 1),
         "due_at": format_timestamp(received + timedelta(seconds=target_seconds)),
     }
+
+
+def sla_reading_at(record: TicketResult, moment: datetime) -> dict | None:
+    """The clock's reading for a record at a stated moment.
+
+    :func:`sla_clock` answers for a run whose clock is still
+    running; this is the same arithmetic evaluated at a moment the
+    caller names — the attainment report judges a decision by the
+    reading at its ``decided_at`` — whatever the record's status
+    now. ``None`` when the record has no parseable ``received_at``:
+    no clock ever started on record, and no reading is guessed.
+    """
+    received = parse_timestamp(record.received_at)
+    if received is None:
+        return None
+    return _reading(received, record.composition.priority_band, moment)
+
+
+def sla_clock(record: TicketResult, now: datetime | None = None) -> dict | None:
+    """The SLA clock for one record, or ``None`` when it isn't running.
+
+    Returns the state, the band's target, the ticket's age, and the
+    seconds left before breach (negative once breached).
+    """
+    if record.status != "awaiting_agent":
+        return None
+    received = parse_timestamp(record.received_at)
+    if received is None:
+        return None
+    now = now or datetime.now(timezone.utc)
+    return _reading(received, record.composition.priority_band, now)

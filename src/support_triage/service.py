@@ -320,8 +320,16 @@ class TriageService:
         by: str = "",
         reason: str = "",
         assignee: str = "",
+        now: datetime | None = None,
     ) -> TicketResult:
-        """Record the agent's decision for a ticket waiting at the gate."""
+        """Record the agent's decision for a ticket waiting at the gate.
+
+        The decision's moment is stamped here (``decided_at``) —
+        the service owns the stamp, and it rides the resume payload
+        so the graph's gate node writes the same moment the direct
+        path does. ``now`` is injectable, the house idiom, so tests
+        and the golden pack decide at a stated instant.
+        """
         record = self.store.get(ticket_id)
         if record is None:
             raise KeyError(f"unknown ticket {ticket_id!r}")
@@ -330,11 +338,13 @@ class TriageService:
                 f"ticket {ticket_id} is {record.status}, not awaiting_agent — "
                 "a decision has already been recorded"
             )
+        stamp = format_timestamp(now or datetime.now(timezone.utc))
         payload = {
             "decision": decision,
             "by": by,
             "reason": reason,
             "assignee": assignee,
+            "decided_at": stamp,
         }
         resumed = self._try_resume(ticket_id, payload)
         if resumed is not None:
@@ -349,6 +359,7 @@ class TriageService:
             note = f"{note} [assigned to {assignee}]".strip()
         record.decision_reason = note
         record.status = "triaged" if decision == "approved" else "rejected"
+        record.decided_at = stamp
         self.store.save(record)
         return record
 
@@ -589,6 +600,20 @@ class TriageService:
         from .watch import build_watch
 
         return build_watch(self.store.all_records(), load_roster(), now)
+
+    def sla_attainment(self, start: datetime, end: datetime) -> dict:
+        """The SLA attainment report for a period (attainment.py).
+
+        A pure read over the stored runs: what share of the
+        decisions that landed in [start, end) met their band's
+        target, per queue and band, with the still-open runs as a
+        snapshot at the period end. Decisions recorded before the
+        ``decided_at`` stamp existed belong to no period — the
+        report counts them on its face as its data boundary.
+        """
+        from .attainment import build_attainment
+
+        return build_attainment(self.store.all_records(), start, end)
 
     def reassign_run(
         self,
