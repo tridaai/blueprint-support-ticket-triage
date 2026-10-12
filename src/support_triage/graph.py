@@ -70,7 +70,7 @@ from .schemas import (
     TicketResult,
     TraceStep,
 )
-from .templates import build_template_draft
+from .templates import build_template_draft, template_state_block
 
 DUPLICATE_THRESHOLD_DEFAULT = 0.85
 
@@ -111,6 +111,13 @@ class TriageState(TypedDict, total=False):
     # The conversation thread this run belongs to (threads.py),
     # assigned by the service at intake.
     thread_id: str
+    # The effective template registry (template_governance.py),
+    # snapshotted by the service at intake: registry rows keyed by
+    # template name. The compose node judges the candidate
+    # template's state against it — only a live template drafts.
+    # Absent when the graph is driven without the service, in
+    # which case the bundled wording stands, as it always has.
+    template_records: list
 
 
 @dataclass
@@ -308,6 +315,9 @@ def build_graph(
             is_duplicate=duplicate.is_duplicate,
             is_reopen=is_reopen,
         )
+        governed_templates = {
+            row["name"]: row for row in state.get("template_records") or []
+        } or None
         draft = build_template_draft(
             decisions,
             composed,
@@ -315,6 +325,23 @@ def build_graph(
             sender_name=ticket.sender_name,
             is_duplicate=duplicate.is_duplicate,
             is_reopen=is_reopen,
+            governed_templates=governed_templates,
+        )
+        # The governance skip, when there is one: this run passed
+        # every slice gate but the template is not live, so no
+        # draft was built. The record says so below, in the same
+        # vocabulary as the reopen suppression line.
+        state_block = (
+            template_state_block(
+                decisions,
+                composed,
+                verdict,
+                is_duplicate=duplicate.is_duplicate,
+                is_reopen=is_reopen,
+                governed_templates=governed_templates,
+            )
+            if draft is None
+            else None
         )
         usage = meta.get("usage", {})
         telemetry = RunTelemetry(
@@ -457,6 +484,12 @@ def build_graph(
                 else "reopen floor: band already critical — floor applied, no raise possible"
             )
             details.append("template draft: suppressed (reopen runs never get the canned draft)")
+        if state_block is not None:
+            blocked_name, blocked_state = state_block
+            details.append(
+                f"template draft: skipped — template {blocked_name} is "
+                f"{blocked_state} (not live); no draft offered"
+            )
         return {
             "result": result.model_dump(),
             "_details": details,

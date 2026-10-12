@@ -11,6 +11,14 @@ nothing, ever.
 Every other ticket gets no draft at all. That asymmetry is the point:
 the template exists to show where straight-through handling *would*
 start, under the autonomy recommendation — not to draft the queue.
+
+Which wording stands behind the family's names is governed
+(template_governance.py): the bundled text here is the default,
+and a governed record — authored, edited, promoted, retired by
+named people — replaces it for its name, state included. The
+state check lives in this module, at the one place drafts are
+built; a template that is not live drafts nothing, and the run's
+record says the step was skipped for state.
 """
 
 from __future__ import annotations
@@ -72,6 +80,51 @@ _TEMPLATE = (
 )
 
 
+def _slice_gates(
+    decisions: DecisionSet,
+    composition: Composition,
+    guardrails: GuardrailOutcome,
+    *,
+    is_duplicate: bool = False,
+    is_reopen: bool = False,
+) -> bool:
+    """The safest-slice gates, in one place: both the draft builder
+    and the governance block below judge by exactly these, so the
+    run's explanation of a skipped draft can never drift from the
+    rule that skipped it."""
+    if is_reopen:
+        # No second template, ever: a customer whose issue already
+        # failed once does not get the canned path again. Enforced
+        # here — the one place drafts are built — not by asking a
+        # model or an operator to remember.
+        return False
+    if decisions.choice("category") != "how_to":
+        return False
+    if decisions.confidence("category") < 0.80:
+        return False
+    if any(composition.flags.values()):
+        return False
+    if not guardrails.passed or guardrails.requires_human_review:
+        return False
+    if is_duplicate:
+        return False
+    return True
+
+
+def _governed_row(
+    governed_templates: dict | None, area: str
+) -> dict | None:
+    """The effective registry row for ``area``'s template, when the
+    caller supplied the registry (the service does, on every run).
+    ``None`` — a graph driven without the service — means the
+    bundled wording stands, exactly as before governance existed.
+    A supplied registry that somehow lacks the name falls back to
+    the bundled row for the area rather than inventing a state."""
+    if governed_templates is None:
+        return None
+    return governed_templates.get(template_name(area))
+
+
 def build_template_draft(
     decisions: DecisionSet,
     composition: Composition,
@@ -80,28 +133,73 @@ def build_template_draft(
     sender_name: str = "",
     is_duplicate: bool = False,
     is_reopen: bool = False,
+    governed_templates: dict | None = None,
 ) -> DraftInfo | None:
-    """A draft for the safest slice only; ``None`` everywhere else."""
-    if is_reopen:
-        # No second template, ever: a customer whose issue already
-        # failed once does not get the canned path again. Enforced
-        # here — the one place drafts are built — not by asking a
-        # model or an operator to remember.
-        return None
-    if decisions.choice("category") != "how_to":
-        return None
-    if decisions.confidence("category") < 0.80:
-        return None
-    if any(composition.flags.values()):
-        return None
-    if not guardrails.passed or guardrails.requires_human_review:
-        return None
-    if is_duplicate:
+    """A draft for the safest slice only; ``None`` everywhere else.
+
+    Governance (template_governance.py) is consulted at this one
+    place: when the registry row for the area's template is not
+    LIVE — a draft under review, a retired template — no draft is
+    built, however clean the slice. A live governed row supplies
+    the words and the version stamped onto the draft; the bundled
+    wording serves where no record stands.
+    """
+    if not _slice_gates(
+        decisions,
+        composition,
+        guardrails,
+        is_duplicate=is_duplicate,
+        is_reopen=is_reopen,
+    ):
         return None
     area = decisions.choice("product_area")
-    guide = _AREA_GUIDES.get(area, _AREA_GUIDES["other"])
+    row = _governed_row(governed_templates, area)
+    if row is not None and row.get("state") != "live":
+        return None
+    if row is not None:
+        text = str(row.get("text") or _TEMPLATE)
+        guide = str(row.get("guide") or _AREA_GUIDES["other"])
+        version = int(row.get("version") or BUNDLED_VERSION)
+    else:
+        text = _TEMPLATE
+        guide = _AREA_GUIDES.get(area, _AREA_GUIDES["other"])
+        version = BUNDLED_VERSION
     name = (sender_name or "").split()[0] if sender_name.strip() else "there"
     return DraftInfo(
-        text=_TEMPLATE.format(name=name, guide=guide),
-        template=f"how_to_first_response[{area}]",
+        text=text.format(name=name, guide=guide),
+        template=template_name(area),
+        template_version=version,
     )
+
+
+def template_state_block(
+    decisions: DecisionSet,
+    composition: Composition,
+    guardrails: GuardrailOutcome,
+    *,
+    is_duplicate: bool = False,
+    is_reopen: bool = False,
+    governed_templates: dict | None = None,
+) -> tuple[str, str] | None:
+    """Why governance withheld a draft this run would otherwise
+    have earned: ``(template name, state)`` when every slice gate
+    passes but the template's registry row is not live — else
+    ``None``. The compose step asks so the run's record can say,
+    in the vocabulary it already uses for the reopen suppression,
+    that the template step was skipped for state — the record
+    shows the skip; this function is the only judge of it, using
+    the same gates the builder does.
+    """
+    if not _slice_gates(
+        decisions,
+        composition,
+        guardrails,
+        is_duplicate=is_duplicate,
+        is_reopen=is_reopen,
+    ):
+        return None
+    area = decisions.choice("product_area")
+    row = _governed_row(governed_templates, area)
+    if row is None or row.get("state") == "live":
+        return None
+    return template_name(area), str(row.get("state") or "draft")

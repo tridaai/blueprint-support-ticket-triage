@@ -212,6 +212,13 @@ class TriageService:
                     "history_context": history["context"],
                     "history": history["summary"],
                     "thread_id": thread_id,
+                    # The effective template registry at intake
+                    # (template_governance.py): the compose node
+                    # judges the candidate template's state — and
+                    # takes its words and version — from this
+                    # snapshot, so a governance act lands on the
+                    # next run, never halfway through one.
+                    "template_records": self._template_snapshot(),
                 },
                 config,
             )
@@ -525,6 +532,15 @@ class TriageService:
         from .livecal import live_calibration
 
         return live_calibration(self.store.all_records())
+
+    def _template_snapshot(self) -> list[dict]:
+        """The effective template registry right now
+        (template_governance.py): bundled defaults with governed
+        records standing in their place. Snapshotted at intake so
+        a run composes against one registry, start to finish."""
+        from . import template_governance
+
+        return template_governance.registry(self.store.all_templates())
 
     def template_effectiveness(self) -> dict:
         """Do the template drafts earn their place?
