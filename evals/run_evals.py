@@ -1,6 +1,6 @@
 """Golden routing eval: known tickets in, routing truth checked.
 
-Sixty-nine synthetic tickets with authored expectations — category,
+Seventy synthetic tickets with authored expectations — category,
 queue, priority band, and the five safety/engineering verify flags.
 (36 through round 2; round 3 added multi-issue tickets, three more
 injection phrasings, a calm ticket that must stay low, a repeat
@@ -55,7 +55,17 @@ section by section against hand-derived figures, then the
 handshake played out: self-acceptance refused, acceptance with
 exceptions storing the dispute and editing no figure, a newer
 page superseding an unaccepted one, and every run record
-byte-identical across the whole lifecycle.)
+byte-identical across the whole lifecycle; the template-
+governance round added the governance case — a template's full
+lifecycle played against staged runs: authored words standing
+in draft and drafting nothing, self-promotion refused by name,
+a second pair of eyes letting the words serve, the effectiveness
+figures decaying past the review margin over the retirement
+floor until the watch proposes retirement, the due template
+still serving (a proposal is not an act), a named retirement
+ending its drafting, an edit on a live template dropping it
+back to draft at a bumped version until re-promoted — and no
+run record written by any of it.)
 Each case runs the full pipeline (screen → duplicate → one decision
 call → composition → guardrails) through a fresh service, on the
 deterministic offline backend by default, so the gate is hermetic:
@@ -1719,6 +1729,196 @@ def check_handoff_case(service: TriageService, case: dict) -> list[str]:
     return failures
 
 
+_MISSING = object()
+
+
+def check_template_governance_case(service, case: dict) -> list[str]:
+    """Round 15 — template governance: the lifecycle, end to end.
+
+    ``template_gov_seed`` runs premise tickets under the bundled
+    defaults (each entry asserts the template it earns), and the
+    governed records in the store are snapshotted — no governance
+    act that follows may write to a run's record; the snapshot is
+    re-checked at the end. ``template_gov_actions`` then walks
+    the lifecycle in order: an ``author`` creates words in draft,
+    ``run`` entries assert what selection did with the template
+    in that state (a draft or retired template earns no draft,
+    and the trace names the skip and the state; ``expect_skip``
+    is the state), ``promote``/``edit``/``retire`` perform the
+    acts — any of them may carry ``expect_error``, a fragment the
+    refusal must name (self-promotion is the standing example) —
+    and ``expect_view`` asserts the registry's public view of a
+    template: its state, version, effectiveness flag, measured
+    uses, and the retirement watch's verdict. Run entries may
+    carry ``outcome`` (recorded as in the template case) and
+    ``reopen`` (the run is reopened once) — the raw material the
+    retirement watch reads, through round 11's own figures.
+    """
+    failures: list[str] = []
+
+    def run_expect(entry: dict, where: str):
+        ticket_in = TicketInput.model_validate(entry["ticket"])
+        try:
+            result = service.run_ticket(ticket_in).result
+        except Exception as exc:  # noqa: BLE001 - a failed run is a failure
+            failures.append(f"{where}: run failed: {exc}")
+            return None
+        want = entry.get("expect_template", _MISSING)
+        if want is not _MISSING:
+            got = result.draft.template if result.draft else None
+            if got != want:
+                failures.append(
+                    f"{where}: expected template {want!r}, got {got!r}"
+                )
+        if entry.get("expect_template_version") is not None:
+            got_version = (
+                result.draft.template_version if result.draft else None
+            )
+            if got_version != entry["expect_template_version"]:
+                failures.append(
+                    f"{where}: expected template version "
+                    f"{entry['expect_template_version']}, got {got_version}"
+                )
+        if entry.get("expect_text_contains"):
+            text = result.draft.text if result.draft else ""
+            if entry["expect_text_contains"] not in text:
+                failures.append(
+                    f"{where}: draft should carry "
+                    f"{entry['expect_text_contains']!r}; got {text[:120]!r}"
+                )
+        if entry.get("expect_skip"):
+            name = entry["expect_template_name"]
+            line = (
+                f"template draft: skipped — template {name} is "
+                f"{entry['expect_skip']} (not live); no draft offered"
+            )
+            details = [
+                d for step in result.trace for d in step.details
+            ]
+            if line not in details:
+                failures.append(
+                    f"{where}: trace should name the state skip "
+                    f"{line!r}; details were {details}"
+                )
+        if entry.get("outcome"):
+            try:
+                _record_eval_outcome(
+                    service, result.ticket_id, entry["outcome"]
+                )
+            except Exception as exc:  # noqa: BLE001 - asserted as a failure
+                failures.append(f"{where}: outcome failed: {exc}")
+        if entry.get("reopen"):
+            try:
+                service.reopen_run(
+                    result.ticket_id,
+                    message=(
+                        "I followed the steps and it still does not "
+                        "work — please look again."
+                    ),
+                    actor="eval-agent",
+                )
+            except Exception as exc:  # noqa: BLE001 - a failed act is a failure
+                failures.append(f"{where}: reopen failed: {exc}")
+        return result
+
+    for entry in case.get("template_gov_seed", []):
+        run_expect(entry, f"seed {entry['ticket']['ticket_id']}")
+
+    snapshot = {
+        record.ticket_id: record.model_dump_json()
+        for record in service.store.all_records()
+    }
+
+    acts = {
+        "author": lambda a: service.author_template(
+            area=a["area"], text=a["text"], guide=a["guide"],
+            actor=a["actor"], reason=a.get("reason", ""),
+        ),
+        "edit": lambda a: service.edit_template(
+            a["name"], actor=a["actor"], text=a.get("text"),
+            guide=a.get("guide"), reason=a.get("reason", ""),
+        ),
+        "promote": lambda a: service.promote_template(
+            a["name"], actor=a["actor"], reason=a.get("reason", "")
+        ),
+        "retire": lambda a: service.retire_template(
+            a["name"], actor=a["actor"], reason=a.get("reason", "")
+        ),
+    }
+    for index, action in enumerate(case.get("template_gov_actions", [])):
+        kind = action["type"]
+        where = f"action {index} ({kind})"
+        if kind == "run":
+            run_expect(action, where)
+            continue
+        if kind == "expect_view":
+            views = {
+                row["name"]: row
+                for row in service.list_templates()["templates"]
+            }
+            view = views.get(action["name"])
+            if view is None:
+                failures.append(f"{where}: no view for {action['name']!r}")
+                continue
+            for field in ("state", "version", "source", "retirement_due"):
+                if field in action and view[field] != action[field]:
+                    failures.append(
+                        f"{where}: view {field} should be "
+                        f"{action[field]!r}, got {view[field]!r}"
+                    )
+            eff = view.get("effectiveness") or {}
+            if "flag" in action and eff.get("flag", "") != action["flag"]:
+                failures.append(
+                    f"{where}: effectiveness flag should be "
+                    f"{action['flag']!r}, got {eff.get('flag')!r}"
+                )
+            if "uses" in action and eff.get("uses") != action["uses"]:
+                failures.append(
+                    f"{where}: effectiveness uses should be "
+                    f"{action['uses']}, got {eff.get('uses')}"
+                )
+            continue
+        if kind not in acts:
+            failures.append(f"{where}: unknown action type {kind!r}")
+            continue
+        try:
+            record = acts[kind](action)
+        except Exception as exc:  # noqa: BLE001 - refusals are asserted on
+            if action.get("expect_error"):
+                if action["expect_error"] not in str(exc):
+                    failures.append(
+                        f"{where}: refusal should name "
+                        f"{action['expect_error']!r}; got {exc}"
+                    )
+            else:
+                failures.append(f"{where}: act failed: {exc}")
+            continue
+        if action.get("expect_error"):
+            failures.append(
+                f"{where}: expected refusal naming "
+                f"{action['expect_error']!r}; the act succeeded"
+            )
+            continue
+        for field in ("state", "version"):
+            if field in action.get("expect_record", {}):
+                got = getattr(record, field)
+                want = action["expect_record"][field]
+                if got != want:
+                    failures.append(
+                        f"{where}: record {field} should be {want!r}, "
+                        f"got {got!r}"
+                    )
+
+    for ticket_id, frozen in snapshot.items():
+        current = service.get_record(ticket_id).model_dump_json()
+        if current != frozen:
+            failures.append(
+                f"governance wrote to run record {ticket_id} — records "
+                "are the past and stay byte-identical under every act"
+            )
+    return failures
+
+
 def main() -> int:
     cases = load_cases()
     service = fresh_service()
@@ -1727,7 +1927,9 @@ def main() -> int:
     for case in cases:
         # A fresh service per case keeps the duplicate index honest:
         # only a case's own `previous` ticket may link to it.
-        if "template_seed" in case:
+        if "template_gov_seed" in case:
+            failures = check_template_governance_case(fresh_service(), case)
+        elif "template_seed" in case:
             failures = check_template_case(fresh_service(), case)
         elif "handoff_seed" in case:
             failures = check_handoff_case(fresh_service(), case)

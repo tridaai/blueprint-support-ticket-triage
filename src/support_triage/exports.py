@@ -777,6 +777,20 @@ def render_text(document: dict) -> str:
                 "nothing about any run, this one included."
             )
         else:
+            if template_stats.get("template_version"):
+                lines.append(
+                    f"Template: {template_stats['template']} — drafted "
+                    f"under version {template_stats['template_version']} "
+                    "of the template, live at the time — only a live "
+                    "template drafts (template_governance.py)."
+                )
+            elif template_stats.get("template_state_at_draft"):
+                lines.append(
+                    f"Template: {template_stats['template']} — drafted "
+                    "while the template stood live; the run predates "
+                    "recorded template versions, so no version is "
+                    "claimed for it."
+                )
             lines.append(template_stats["note"])
 
     lines.append("")
