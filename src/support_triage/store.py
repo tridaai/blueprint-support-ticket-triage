@@ -138,6 +138,25 @@ class StoreBase:
             for handoff in self.__dict__.get("_handoffs", {}).values()
         ]
 
+    # -- governed template records (template_governance.py) -----------------
+    # A template record exists only for a template someone has
+    # governed; the bundled wording is the default for every name
+    # without one (the registry merge lives in
+    # template_governance.py). Same arrangement as the handoff
+    # records: process-local defaults for the doubles,
+    # PostgresStore persists them in the templates table
+    # (migration 0007).
+
+    def save_template(self, record) -> None:
+        log = self.__dict__.setdefault("_templates", {})
+        log[record.name] = record.model_copy(deep=True)
+
+    def all_templates(self) -> list:
+        return [
+            record.model_copy(deep=True)
+            for record in self.__dict__.get("_templates", {}).values()
+        ]
+
     def queue_summary(
         self, filters: dict | None = None, now: datetime | None = None
     ) -> list[dict]:
@@ -484,6 +503,30 @@ class PostgresStore(StoreBase):
                 cur.execute("SELECT payload FROM handoffs ORDER BY handoff_id")
                 rows = cur.fetchall()
         return [ShiftHandoff.model_validate(row[0]) for row in rows]
+
+    # -- governed template records: persisted in their own table (0007) -----
+
+    def save_template(self, record) -> None:
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO templates (name, payload)
+                    VALUES (%s, %s::jsonb)
+                    ON CONFLICT (name) DO UPDATE SET payload = EXCLUDED.payload
+                    """,
+                    (record.name, json.dumps(record.model_dump())),
+                )
+            conn.commit()
+
+    def all_templates(self) -> list:
+        from .schemas import TemplateRecord
+
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT payload FROM templates ORDER BY name")
+                rows = cur.fetchall()
+        return [TemplateRecord.model_validate(row[0]) for row in rows]
 
     def get(self, ticket_id: str) -> TicketResult | None:
         with self._connect() as conn:

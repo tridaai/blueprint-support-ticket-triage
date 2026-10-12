@@ -83,6 +83,13 @@ class DraftInfo(BaseModel):
 
     text: str = ""
     template: str = ""
+    # The governed version of the template this draft was written
+    # under (template_governance.py): 1 for the bundled wording as
+    # shipped, bumped on every governed edit. 0 is the honest
+    # unrecorded shape — a draft composed before template versions
+    # existed, or by a graph driven without the service — never a
+    # guess at a version nobody stamped.
+    template_version: int = 0
     note: str = "Template draft — written by code, not a model. An agent sends it; the system does not."
 
 
@@ -478,6 +485,54 @@ class ShiftHandoff(BaseModel):
     accepted_at: str = ""  # ISO datetime, stamped by the service
     acceptance: str = ""  # accepted | accepted_with_exceptions
     exceptions: str = ""  # the acceptor's disputed items, verbatim
+
+
+class TemplateAct(BaseModel):
+    """One entry in a template's append-only history
+    (template_governance.py): who did what to the template, when,
+    and why. Acts are never edited or removed — a correction is a
+    later act, exactly like an operator correction on a run."""
+
+    action: str = ""  # authored | edited | promoted | retired
+    actor: str = ""
+    at: str = ""  # ISO datetime, stamped by the service
+    reason: str = ""
+    version: int = 0  # the record's version once this act stands
+
+
+class TemplateRecord(BaseModel):
+    """One governed template (template_governance.py).
+
+    The template family is bundled code (templates.py): one body,
+    keyed by product area, named ``how_to_first_response[<area>]``
+    on every run that carries it. A record exists only for a
+    template someone has governed — authored over the bundled
+    wording, edited, promoted, retired — and from that moment the
+    record IS the template: its state decides whether selection
+    may use it, its text and guide are the words a draft is
+    written from, and its ``version`` (bumped on every text edit)
+    is stamped onto each draft it produces. A template with no
+    record stands at the bundled default: live, version 1, the
+    wording as shipped.
+
+    The lifecycle is ``draft → live → retired``. Only a live
+    template is ever selected. Editing the words of a live
+    template returns it to draft — the words an agent sends never
+    change silently underneath the approval that let them serve.
+    Retired is terminal: the record stays as history, and its
+    history (``TemplateAct`` entries) is append-only.
+    """
+
+    name: str  # how_to_first_response[<area>] — the name runs carry
+    area: str = ""  # the product area the name is keyed by
+    text: str = ""  # the draft body ({name} / {guide} placeholders)
+    guide: str = ""  # where the documented answer lives, for the area
+    state: str = "draft"  # draft | live | retired
+    version: int = 1  # bumped on every text edit; acts don't bump it
+    authored_by: str = ""  # who authored the current version's words
+    created_at: str = ""  # ISO datetime, stamped by the service
+    updated_at: str = ""  # ISO datetime, stamped by the service
+    history: list[TemplateAct] = Field(default_factory=list)
 
 
 class RunTelemetry(BaseModel):
