@@ -108,6 +108,7 @@
   <button id="tab-threads">Threads</button>
   <button id="tab-qa">QA review</button>
   <button id="tab-incidents">Incidents</button>
+  <button id="tab-watch">Breach watch</button>
 </nav>
 
 <main id="view-console">
@@ -356,6 +357,23 @@
     <div id="inc-list" class="empty">Loading…</div>
     <h2 style="margin-top:18px">Incident detail</h2>
     <div id="inc-detail" class="empty">Pick an incident above — its members read live from their runs, with the addition candidates the rule currently offers.</div>
+  </section>
+</main>
+
+<main id="view-watch" style="display:none; grid-template-columns:1fr">
+  <section>
+    <h2>Breach watch — the queue, ranked by the clock</h2>
+    <p class="note">Every run still waiting at the gate, ordered by the <strong>code SLA clock</strong> — each run against its own priority band's target — never by the model's <em>sla_breach_risk</em> judgement, which rides each row for the lead's eye and orders nothing. Bands are absolute distance to breach: <strong>breached</strong>, <strong>due within 1h</strong> (the critical band's whole target), <strong>due within 4h</strong> (the high band's), <strong>later</strong>. They are not the clock's own states — a low-band run is "due soon" in the clock's last-quarter sense with hours still left, and reads <em>later</em> here. The lead's one act is the reassignment: a named lead, a reason, and a new assignee, appended to the run's assignment trail. It moves the run between people — the clock, the composition and the status do not move, and nothing reassigns itself.</p>
+    <div class="row">
+      <label for="watch-lead">Lead name</label>
+      <input type="text" id="watch-lead" placeholder="e.g. L. Lead">
+      <label for="watch-reason">Reason</label>
+      <input type="text" id="watch-reason" placeholder="required to reassign" style="min-width:280px">
+      <button id="watch-refresh">Refresh</button>
+      <span class="note" id="watch-status"></span>
+    </div>
+    <div id="watch-counts" class="empty" style="margin-top:14px">Loading…</div>
+    <div id="watch-rows" class="empty" style="margin-top:10px">Loading…</div>
   </section>
 </main>
 
@@ -1137,6 +1155,70 @@ async function openIncidentDetail(incidentId) {
 }
 $('inc-refresh').onclick = loadIncidents;
 
+// ---------------------------------------------------------------- breach watch
+function watchBandPill(band) {
+  const cls = band === 'breached' ? 'bad' : band === 'due_within_1h' ? 'warn' : band === 'due_within_4h' ? '' : 'good';
+  const label = {breached: 'breached', due_within_1h: 'due ≤ 1h', due_within_4h: 'due ≤ 4h', later: 'later'}[band] || band;
+  return pill(label, cls);
+}
+
+async function loadWatch() {
+  const countsBox = $('watch-counts');
+  const rowsBox = $('watch-rows');
+  try {
+    const res = await fetch('/api/watch', {headers: headers()});
+    if (!res.ok) throw new Error('unavailable');
+    const w = await res.json();
+    const c = w.counts || {};
+    countsBox.className = '';
+    countsBox.innerHTML = `<p class="note" style="margin:0">As of ${esc(w.as_of)} · ${w.open_runs} open run(s)${w.unclocked_open ? ` · ${w.unclocked_open} open with no running clock (counted, never ranked on a guessed one)` : ''} · bands: within 1h at ≤ ${Math.round((w.bands.due_within_1h_seconds || 3600) / 60)} min to breach, within 4h at ≤ ${Math.round((w.bands.due_within_4h_seconds || 14400) / 3600)}h. ${esc(w.clock_note || '')}</p>
+      <p style="margin:8px 0 0">${watchBandPill('breached')} ${c.breached || 0} &nbsp; ${watchBandPill('due_within_1h')} ${c.due_within_1h || 0} &nbsp; ${watchBandPill('due_within_4h')} ${c.due_within_4h || 0} &nbsp; ${watchBandPill('later')} ${c.later || 0}</p>`;
+    if (!w.rows || !w.rows.length) {
+      rowsBox.className = 'empty';
+      rowsBox.textContent = 'Nothing is waiting at the gate — the watch has no rows.';
+      return;
+    }
+    rowsBox.className = '';
+    rowsBox.innerHTML = `<table><tr><th>Ticket</th><th>Watch band</th><th>To breach</th><th>Queue</th><th>Priority</th><th>Clock state</th><th>Model risk</th><th>Assignee</th><th>Suggested</th><th>Reassign to</th><th></th></tr>` +
+      w.rows.map(r => {
+        const left = r.seconds_to_breach < 0
+          ? `<span class="flag">${fmtDuration(r.seconds_to_breach)} over</span>`
+          : fmtDuration(r.seconds_to_breach) + ' left';
+        const who = r.assignee
+          ? `${esc(r.assignee)}<br><span class="note">${r.assignee_source === 'reassignment' ? `reassigned by ${esc(r.assigned_by)}` : 'gate note'}</span>`
+          : '<span class="note">unassigned</span>';
+        const risk = (r.sla_breach_risk === null || r.sla_breach_risk === undefined)
+          ? '—'
+          : `${Number(r.sla_breach_risk).toFixed(1)} <span class="note">/ 10</span>`;
+        return `<tr><td class="clickable" data-id="${esc(r.ticket_id)}">${esc(r.ticket_id)}<br><span class="note">${esc(r.subject || '')}</span></td><td>${watchBandPill(r.watch_band)}</td><td>${left}<br><span class="note">due ${esc(r.due_at)}</span></td><td>${esc(r.queue)}</td><td>${r.priority_score.toFixed(1)} ${bandPill(r.priority_band)}</td><td>${esc(r.sla_state)}</td><td>${risk}</td><td>${who}</td><td>${r.suggested_agent ? esc(r.suggested_agent) : `<span class="note">${esc(r.suggestion_note || '—')}</span>`}</td><td><input type="text" data-assignee="${esc(r.ticket_id)}" value="${esc(r.suggested_agent || '')}" placeholder="agent name" style="min-width:110px"></td><td><button data-reassign="${esc(r.ticket_id)}">Reassign</button></td></tr>`;
+      }).join('') + `</table>
+      <p class="note">Ranked by time to breach on the code clock; ties break by priority score, the queue's own order. Reassigning appends to the run's assignment trail — its received time (the clock's start), composition and status are untouched, so a reassignment never buys time. Click a ticket id to open its decision record.</p>`;
+    rowsBox.querySelectorAll('td.clickable').forEach(td => td.onclick = () => { showView('console'); openTicket(td.dataset.id); });
+    rowsBox.querySelectorAll('[data-reassign]').forEach(btn => btn.onclick = async () => {
+      const ticketId = btn.dataset.reassign;
+      const by = ($('watch-lead').value || '').trim();
+      const reason = ($('watch-reason').value || '').trim();
+      const input = rowsBox.querySelector(`[data-assignee="${CSS.escape(ticketId)}"]`);
+      const assignee = (input && input.value || '').trim();
+      const status = $('watch-status');
+      if (!assignee || !by || !reason) { status.textContent = 'a reassignment names the agent, the lead, and the reason'; return; }
+      status.textContent = 'working…';
+      try {
+        const res = await fetch(`/api/runs/${encodeURIComponent(ticketId)}/reassign`, {method: 'POST', headers: headers(), body: JSON.stringify({assignee, by, reason})});
+        if (!res.ok) { const err = await res.json().catch(() => ({})); throw new Error(err.detail || res.statusText); }
+        await loadWatch();
+        status.textContent = `reassigned — ${ticketId} is ${assignee}'s now; its clock did not move`;
+      } catch (e) { status.textContent = 'failed: ' + e.message; }
+    });
+  } catch (e) {
+    countsBox.className = 'empty';
+    countsBox.textContent = 'Breach watch unavailable.';
+    rowsBox.className = 'empty';
+    rowsBox.textContent = '';
+  }
+}
+$('watch-refresh').onclick = loadWatch;
+
 $('analyze').onclick = async () => {
   let ticket;
   try { ticket = JSON.parse($('json').value); }
@@ -1472,17 +1554,20 @@ function showView(name) {
   $('view-threads').style.display = name === 'threads' ? '' : 'none';
   $('view-qa').style.display = name === 'qa' ? '' : 'none';
   $('view-incidents').style.display = name === 'incidents' ? '' : 'none';
+  $('view-watch').style.display = name === 'watch' ? '' : 'none';
   $('tab-console').classList.toggle('active', name === 'console');
   $('tab-dashboards').classList.toggle('active', name === 'dashboards');
   $('tab-compare').classList.toggle('active', name === 'compare');
   $('tab-threads').classList.toggle('active', name === 'threads');
   $('tab-qa').classList.toggle('active', name === 'qa');
   $('tab-incidents').classList.toggle('active', name === 'incidents');
+  $('tab-watch').classList.toggle('active', name === 'watch');
   if (name === 'dashboards' && !dashboardsLoaded) loadDashboards();
   if (name === 'compare' && !$('cmp-json').value) $('cmp-json').value = $('json').value;
   if (name === 'threads') loadThreads();
   if (name === 'qa') loadQaSamples();
   if (name === 'incidents') loadIncidents();
+  if (name === 'watch') loadWatch();
 }
 $('tab-console').onclick = () => showView('console');
 $('tab-dashboards').onclick = () => showView('dashboards');
@@ -1490,6 +1575,7 @@ $('tab-compare').onclick = () => showView('compare');
 $('tab-threads').onclick = () => showView('threads');
 $('tab-qa').onclick = () => showView('qa');
 $('tab-incidents').onclick = () => showView('incidents');
+$('tab-watch').onclick = () => showView('watch');
 $('dash-refresh').onclick = loadDashboards;
 
 // ---------------------------------------------------------------- policy
