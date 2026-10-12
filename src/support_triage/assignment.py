@@ -4,8 +4,11 @@ Advisory, end to end. For a ticket waiting at the gate this module
 ranks the agents on the roster (roster.py) who cover the ticket's
 queue and prints its working — the suggestion is worth exactly as
 much as the reasons under it. Nothing here assigns anything: there
-is no write path in this module, and the only assignment in the
-system remains the human's (``POST /tickets/{id}/assign``).
+is no write path in this module, and assignment in the system
+remains a human's act — the gate's ``POST /tickets/{id}/assign``
+note, or the breach watch's reasoned reassignment (watch.py).
+:func:`current_assignee` below is the one reading rule both write
+paths answer to.
 
 The score is a weighted sum of three factors, each computed in code
 from records the system already keeps:
@@ -16,9 +19,8 @@ from records the system already keeps:
   agent with no judged outcomes in the category scores a neutral
   0.5 — no history is not a demerit, and the reason says so.
 - **open load** (0.30) — ``1 / (1 + open)`` where *open* counts the
-  tickets still ``awaiting_agent`` whose record carries this agent
-  as the latest ``[assigned to …]`` note (the assignment idiom the
-  gate writes). Fewer in hand, higher score.
+  tickets still ``awaiting_agent`` whose current assignee, by
+  :func:`current_assignee`, is this agent. Fewer in hand, higher score.
 - **skills** (0.20) — the share of the ticket's needs the agent's
   skill tags cover, where needs are the ticket's category, product
   area, and raised safety flags.
@@ -51,14 +53,48 @@ def _last_assignee(record: TicketResult) -> str:
     return marks[-1] if marks else ""
 
 
+def current_assignee(record: TicketResult) -> dict | None:
+    """Whose run this is, by the one reading rule every surface uses.
+
+    Two write paths exist, and this resolver is where they are
+    reconciled: the breach watch's reassignment appends a
+    structured :class:`~support_triage.schemas.AssignmentEntry`
+    (assignee, lead, reason, time) to ``record.assignments``; the
+    older gate idiom appends a ``[assigned to …]`` mark to
+    ``decision_reason``. The structured trail is the later idiom
+    and wins when it has entries; otherwise the latest mark is
+    the answer; otherwise the run is unassigned (``None``).
+
+    ``source`` says which path answered — ``"reassignment"`` (the
+    entry's lead and time ride along) or ``"note"`` (a gate mark:
+    the mark itself records neither who wrote it nor when, and
+    the resolver says so rather than borrowing ``decision_by``,
+    which belongs to the decision, not the assignment).
+    """
+    if record.assignments:
+        entry = record.assignments[-1]
+        return {
+            "agent": entry.assignee,
+            "source": "reassignment",
+            "by": entry.by,
+            "at": entry.at,
+            "reason": entry.reason,
+        }
+    marked = _last_assignee(record)
+    if marked:
+        return {"agent": marked, "source": "note", "by": "", "at": "", "reason": ""}
+    return None
+
+
 def open_load(records: list[TicketResult], agent: dict) -> int:
-    """Tickets still at the gate whose latest assignment note names
-    this agent."""
+    """Tickets still at the gate whose current assignee — by the
+    one reading rule (:func:`current_assignee`) — is this agent."""
     return sum(
         1
         for record in records
         if record.status == "awaiting_agent"
-        and _matches(_last_assignee(record), agent)
+        and (current := current_assignee(record)) is not None
+        and _matches(current["agent"], agent)
     )
 
 

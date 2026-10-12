@@ -550,6 +550,80 @@ class TriageService:
             raise KeyError(f"unknown ticket {ticket_id!r}")
         return suggest_assignment(record, self.store.all_records(), load_roster())
 
+    # -- the breach watch (watch.py) -----------------------------------------
+
+    def breach_watch(self, now: datetime | None = None) -> dict:
+        """The open queue ranked by the code SLA clock (watch.py).
+
+        A pure read: the watch is recomputed from the stored runs
+        on every call, so it cannot disagree with the queue it
+        ranks. ``now`` is injectable, the sla.py idiom, so tests
+        and the golden pack pin the ranking at a fixed instant.
+        """
+        from .roster import load_roster
+        from .watch import build_watch
+
+        return build_watch(self.store.all_records(), load_roster(), now)
+
+    def reassign_run(
+        self,
+        ticket_id: str,
+        *,
+        assignee: str,
+        by: str,
+        reason: str,
+        now: datetime | None = None,
+    ) -> TicketResult:
+        """Move a waiting run to another agent, from the breach watch.
+
+        The lead's one act on the watch, and a deliberately small
+        one: a named lead, a reason, and a new assignee are all
+        required, and the act is appended to the run's assignment
+        trail (``record.assignments`` — assignment.py's resolver
+        reads the last entry as the current assignee, ahead of the
+        gate's older note marks). Only a run still waiting at the
+        gate can be reassigned: a decided run belongs to its
+        decision's flow, not the duty roster.
+
+        The act moves the run between people and nothing else. The
+        record's ``received_at`` — the SLA clock's start — its
+        composition, its answers, and its status are untouched, so
+        a reassignment can never buy a run more time; the suite
+        pins the record byte-identical apart from the trail, and
+        the clock reading the same before and after.
+        """
+        from .schemas import AssignmentEntry
+        from .sla import format_timestamp
+
+        assignee = (assignee or "").strip()
+        by = (by or "").strip()
+        reason = (reason or "").strip()
+        if not assignee:
+            raise ValueError("a reassignment must name the agent taking the run")
+        if not by:
+            raise ValueError("a reassignment must name the lead making it")
+        if not reason:
+            raise ValueError("a reassignment must carry a reason")
+        record = self.store.get(ticket_id)
+        if record is None:
+            raise KeyError(f"unknown ticket {ticket_id!r}")
+        if record.status != "awaiting_agent":
+            raise ValueError(
+                f"ticket {ticket_id} is {record.status}, not awaiting_agent — "
+                "only a run waiting at the gate can be reassigned"
+            )
+        moment = now or datetime.now(timezone.utc)
+        record.assignments.append(
+            AssignmentEntry(
+                assignee=assignee,
+                by=by,
+                reason=reason,
+                at=format_timestamp(moment),
+            )
+        )
+        self.store.save(record)
+        return record
+
     # -- reopens + threads ---------------------------------------------------
 
     def reopen_run(
@@ -1901,10 +1975,12 @@ class TriageService:
         from .drift import drift_report
         from .exports import build_export
         from .sla import sla_clock
+        from .watch import watch_block_for
 
         record = self.store.get(ticket_id)
         if record is None:
             raise KeyError(f"unknown ticket {ticket_id!r}")
+        export_moment = datetime.now(timezone.utc)
         report = drift_report(self.store.all_records(), eval_per_question)
         questions: dict = {}
         flagged: list[str] = []
@@ -1929,7 +2005,7 @@ class TriageService:
         )
         return build_export(
             record,
-            exported_at=format_timestamp(datetime.now(timezone.utc)),
+            exported_at=format_timestamp(export_moment),
             ticket_input=self.store.get_input(ticket_id),
             sla=sla_clock(record),
             drift=drift,
@@ -1938,6 +2014,11 @@ class TriageService:
                 report, record
             ),
             incident=self.incident_block_for(ticket_id),
+            # The breach-watch band at export time (watch.py): a
+            # point-in-time reading handed in like the drift
+            # context — None when the run has no running clock,
+            # and the export is then what it always was.
+            watch=watch_block_for(record, export_moment),
         )
 
     # -- reads --------------------------------------------------------------

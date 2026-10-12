@@ -461,6 +461,27 @@ class TraceStep(BaseModel):
     duration_ms: float = 0.0
 
 
+class AssignmentEntry(BaseModel):
+    """One reassignment of a waiting run, made from the breach watch.
+
+    An append-only overlay (the corrections precedent): the run's
+    current assignee is the LAST entry here — or, when the list is
+    empty, the latest ``[assigned to …]`` mark the gate wrote into
+    ``decision_reason`` (assignment.py's resolver reads both, in
+    that order, so there is one answer to "whose is this?"). An
+    entry is a lead's named act: who takes the run now, which lead
+    moved it, and why — all three required, or the act is refused.
+    Reassignment moves the run between people; it never touches
+    the run's clock (``received_at`` is intake's, and the SLA
+    target hangs off it), its composition, or its status.
+    """
+
+    assignee: str = ""
+    by: str = ""  # the lead who made the reassignment
+    reason: str = ""
+    at: str = ""  # ISO datetime, stamped by the service
+
+
 class TicketResult(BaseModel):
     """The complete decision record for one ticket."""
 
@@ -512,6 +533,13 @@ class TicketResult(BaseModel):
     playbook_checks: list[PlaybookCheck] = Field(default_factory=list)
     playbook_na: list[PlaybookNaMark] = Field(default_factory=list)
     working_note: Optional[WorkingNote] = None
+    # Reassignments from the breach watch (watch.py): a lead's
+    # named, reasoned acts moving the waiting run to another agent.
+    # Append-only overlay; the effective assignee is the last entry
+    # (assignment.current_assignee resolves it against the older
+    # "[assigned to …]" note idiom). Moving people never moves the
+    # run's clock, composition, or status.
+    assignments: list[AssignmentEntry] = Field(default_factory=list)
     external_action_taken: bool = False  # invariant: always False
     trace: list[TraceStep] = Field(default_factory=list)
     telemetry: Optional[RunTelemetry] = None

@@ -51,7 +51,12 @@ still answer every question about the run:
   and who added it — membership lives on the incident's record,
   and the export is where a reader of one run sees that the run
   was worked as part of an event, without the run's own record
-  carrying anything about it.
+  carrying anything about it;
+- the run's breach-watch band (watch.py), when its SLA clock is
+  running: the band the duty view would place it in, computed at
+  export time from the code clock and labelled as the
+  point-in-time reading it is — the ranking itself belongs to
+  the whole queue and is not restated for one run.
 
 Everything here is composed in code from the stored record. No
 model is consulted and no prose is generated: the text rendering is
@@ -103,6 +108,7 @@ def build_export(
     review: dict | None = None,
     template_stats: dict | None = None,
     incident: dict | None = None,
+    watch: dict | None = None,
 ) -> dict:
     """Assemble the audit document for one stored run (pure)."""
     composition = record.composition
@@ -337,6 +343,12 @@ def build_export(
         # never on the run; ``None`` means the run belongs to no
         # incident and the export is what it always was.
         "incident": incident,
+        # Breach watch (watch.py): this run's band at export time,
+        # handed in by the service like the incident block above —
+        # ``None`` when the run's clock isn't running (decided, or
+        # no parseable received_at), and the export is then what
+        # it always was.
+        "watch": watch,
         "telemetry": record.telemetry.model_dump() if record.telemetry is not None else None,
         "trace": [step.model_dump() for step in record.trace],
         "note": (
@@ -593,6 +605,17 @@ def render_text(document: dict) -> str:
             f"{composed['priority_band']} · due at {sla['due_at']} · "
             f"{_fmt(sla['seconds_to_breach'], 0)}s to breach"
         )
+
+    watch = document.get("watch")
+    if watch:
+        lines.append("")
+        lines.append("BREACH WATCH (band at export time — watch.py)")
+        lines.append(
+            f"Band: {watch['band']} · clock state {watch['sla_state']} · "
+            f"{_fmt(watch['seconds_to_breach'], 0)}s to breach · "
+            f"computed at {watch['computed_at']}"
+        )
+        lines.append(watch["note"])
 
     lines.append("")
     lines.append("DRIFT CONTEXT")

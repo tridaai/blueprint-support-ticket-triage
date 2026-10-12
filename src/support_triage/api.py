@@ -80,6 +80,16 @@ every route delegates, none re-implements. Notable behaviour:
   plus the inter-rater block over the overlap pairs (raw agreement
   and Cohen's kappa per family, paired disagreements side by
   side);
+- the breach watch (watch.py): ``GET /api/watch`` ranks every
+  open run by the code SLA clock — each run against its own
+  priority-band target — into authored bands (breached /
+  due_within_1h / due_within_4h / later), each row carrying its
+  queue, band, current assignee and the advisory suggestion; the
+  model's ``sla_breach_risk`` is shown per row and never orders
+  anything; ``POST /api/runs/{id}/reassign`` is the lead's one
+  act from the view — assignee, lead and reason all required,
+  appended to the run's assignment trail, the clock and the
+  composition untouched;
 - the incident clustering layer (incidents.py): ``GET
   /api/incidents/proposals`` computes the live cluster proposals
   over the stored runs (same product area + category, one arrival
@@ -1337,6 +1347,67 @@ def assignment_suggestion(ticket_id: str):
         return get_service().assignment_suggestion(ticket_id)
     except KeyError:
         raise HTTPException(status_code=404, detail=f"unknown ticket {ticket_id!r}")
+
+
+# ---------------------------------------------------------------------------
+# the breach watch (ranked by the clock; the lead's one act stored)
+# ---------------------------------------------------------------------------
+
+
+class ReassignRequest(BaseModel):
+    assignee: str = ""  # the agent taking the run
+    by: str = ""  # the lead making the reassignment
+    reason: str = ""  # why the run changes hands
+
+
+@app.get("/api/watch")
+def breach_watch():
+    """The duty view: open runs ranked by the code SLA clock.
+
+    Every run still waiting at the gate with a running clock,
+    banded by its absolute distance to breach (breached /
+    due_within_1h / due_within_4h / later — thresholds printed on
+    the payload) and ordered nearest-breach first, ties by the
+    composition priority score. Each row carries the run's queue,
+    band, target, due time, its current assignee (the watch's
+    reassignment trail, else the gate's assignment note) and the
+    advisory suggestion. The model's sla_breach_risk rides each
+    row as a labelled judgement and never orders anything. Open
+    runs with no parseable received_at are counted, not ranked.
+    """
+    return get_service().breach_watch()
+
+
+@app.post("/api/runs/{ticket_id}/reassign")
+def reassign_run(ticket_id: str, body: ReassignRequest, request: Request):
+    """Reassign a waiting run to another agent, under a named lead.
+
+    The breach watch's one act: assignee, lead, and reason are all
+    required (an unnamed field is a 422 naming it), the run must
+    still be waiting at the gate (a decided run is a 409), and the
+    act appends one entry to the run's assignment trail — the
+    record's clock, composition, and status are untouched, so a
+    reassignment never buys a run more time. The response is the
+    updated record, trail included.
+    """
+    require_api_key(request)
+    for field in ("assignee", "by", "reason"):
+        if not getattr(body, field).strip():
+            raise HTTPException(
+                status_code=422, detail=f"a reassignment must name its {field}"
+            )
+    try:
+        record = get_service().reassign_run(
+            ticket_id,
+            assignee=body.assignee,
+            by=body.by,
+            reason=body.reason,
+        )
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"unknown ticket {ticket_id!r}")
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    return record.model_dump()
 
 
 # ---------------------------------------------------------------------------
