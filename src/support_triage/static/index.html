@@ -110,6 +110,7 @@
   <button id="tab-incidents">Incidents</button>
   <button id="tab-watch">Breach watch</button>
   <button id="tab-handoff">Shift handoff</button>
+  <button id="tab-templates">Templates</button>
 </nav>
 
 <main id="view-console">
@@ -397,6 +398,39 @@
     <div id="hof-page" class="empty" style="margin-top:10px">Loading…</div>
     <h2 style="margin-top:18px">History</h2>
     <div id="hof-history" class="empty">Loading…</div>
+  </section>
+</main>
+
+<main id="view-templates" style="display:none; grid-template-columns:1fr">
+  <section>
+    <h2>Template governance — a template earns its way live, and can lose the job</h2>
+    <p class="note">The template first-response draft is the only text this system composes toward a customer, and only for the safest slice. Its wording ships bundled — live at version 1 — until someone governs it. <strong>Authoring</strong> new words starts a record in <strong>draft</strong>: a draft never drafts. <strong>Promotion</strong> to live takes a named approver who is not the version's author, citing the basis. <strong>Editing</strong> a live template's words bumps its version and returns it to draft — the words never change silently under the approval that let them serve. The retirement watch reads the templates' own effectiveness figures: a live template whose reopen rate beats its category's baseline by more than the margin, over enough outcome-bearing uses, is <strong>proposed</strong> for retirement — and keeps serving until a named editor retires it, with a reason. Retired is terminal; the record and its history stay.</p>
+    <div id="tpl-note" class="empty">Loading…</div>
+    <div id="tpl-table" class="empty" style="margin-top:10px">Loading…</div>
+    <h2 style="margin-top:18px">One template</h2>
+    <div class="row">
+      <label for="tpl-pick">Template</label>
+      <select id="tpl-pick"></select>
+      <button id="tpl-refresh">Refresh</button>
+      <span class="note" id="tpl-status"></span>
+    </div>
+    <div id="tpl-detail" style="margin-top:10px"></div>
+    <label for="tpl-text" style="margin-top:10px">Draft body ({name} and {guide} are filled per ticket)</label>
+    <textarea id="tpl-text" spellcheck="false" style="min-height:110px"></textarea>
+    <label for="tpl-guide" style="margin-top:8px">Guide — where the documented answer lives</label>
+    <input type="text" id="tpl-guide" style="width:100%">
+    <div class="row" style="margin-top:10px">
+      <label for="tpl-actor">Actor</label>
+      <input type="text" id="tpl-actor" placeholder="who is acting">
+      <label for="tpl-reason">Reason / basis</label>
+      <input type="text" id="tpl-reason" placeholder="why — recorded on the history" style="flex:1">
+    </div>
+    <div class="row" style="margin-top:10px">
+      <button id="tpl-act" class="primary"></button>
+      <button id="tpl-promote">Promote to live</button>
+      <button id="tpl-retire">Retire</button>
+    </div>
+    <div id="tpl-history" style="margin-top:12px"></div>
   </section>
 </main>
 
@@ -1702,6 +1736,132 @@ $('qa-load').onclick = () => { const id = $('qa-pick').value; if (id) loadQaSamp
 $('qa-report-run').onclick = () => runQaReport(false);
 $('qa-report-all').onclick = () => runQaReport(true);
 
+// ---------------------------------------------------------------- template governance
+function templateStatePill(t) {
+  if (t.state === 'live') return pill('live', 'good');
+  if (t.state === 'retired') return pill('retired', '');
+  return pill('draft — not serving', 'warn');
+}
+
+let templatesCache = [];
+let templateShownName = '';
+
+function templateEffectivenessText(t) {
+  const e = t.effectiveness;
+  if (!e) return '<span class="note">no outcome-bearing uses measured yet</span>';
+  const rate = v => v === null ? 'withheld' : Number(v).toFixed(2);
+  return `${e.uses} use(s) · resolved ${rate(e.resolution_rate)} · reopened ${rate(e.reopen_rate)} (baseline ${rate(e.baseline_reopen_rate)}) · escalated ${rate(e.escalation_rate)}`
+    + (e.flag ? ` · ${pill(e.flag, 'warn')}` : '');
+}
+
+function renderTemplateDetail(t) {
+  const box = $('tpl-detail');
+  const due = t.retirement_due ? `${pill('RETIREMENT DUE', 'warn')} ` : '';
+  box.innerHTML = `<p style="margin:0"><strong>${esc(t.name)}</strong> · ${templateStatePill(t)} · version ${t.version} · ${esc(t.source)}${t.authored_by ? ` · words by ${esc(t.authored_by)}` : ''}</p>
+    <p style="margin:6px 0 0" class="note">Effectiveness: ${templateEffectivenessText(t)}</p>
+    <p style="margin:6px 0 0" class="note">${due}${esc(t.retirement_detail || '')}</p>`;
+  $('tpl-text').value = t.text || '';
+  $('tpl-guide').value = t.guide || '';
+  const hist = (t.history || []).map(a => `<tr><td>${esc(a.action)}</td><td>${esc(a.actor)}</td><td>${esc(a.at)}</td><td>v${a.version}</td><td>${esc(a.reason || '')}</td></tr>`).join('');
+  $('tpl-history').innerHTML = hist
+    ? `<h3 style="margin:6px 0">History — append-only</h3><table><tr><th>Act</th><th>Actor</th><th>At</th><th>Version</th><th>Reason</th></tr>${hist}</table>`
+    : '<p class="note">No governance acts yet — this template stands at its bundled default.</p>';
+  const act = $('tpl-act'), promote = $('tpl-promote'), retire = $('tpl-retire');
+  if (t.source === 'bundled') {
+    act.textContent = 'Author under governance (starts draft)';
+    act.disabled = false; promote.disabled = true; retire.disabled = false;
+    retire.textContent = 'Retire the bundled template';
+  } else if (t.state === 'draft') {
+    act.textContent = 'Save edit';
+    act.disabled = false; promote.disabled = false; retire.disabled = false;
+    retire.textContent = 'Retire';
+  } else if (t.state === 'live') {
+    act.textContent = 'Save edit (returns to draft)';
+    act.disabled = false; promote.disabled = true; retire.disabled = false;
+    retire.textContent = 'Retire';
+  } else {
+    act.textContent = 'Retired — its words are history';
+    act.disabled = true; promote.disabled = true; retire.disabled = true;
+    retire.textContent = 'Retire';
+  }
+}
+
+async function loadTemplates(keepName) {
+  const noteBox = $('tpl-note'), tableBox = $('tpl-table');
+  try {
+    const res = await fetch('/api/templates', {headers: headers()});
+    if (!res.ok) throw new Error(res.statusText);
+    const data = await res.json();
+    templatesCache = data.templates || [];
+    const c = data.constants || {};
+    noteBox.className = '';
+    noteBox.innerHTML = `<p class="note" style="margin:0">${esc(data.note || '')} Retirement floor: ${c.retirement_min_uses} outcome-bearing uses · review margin ${c.reopen_review_margin} · rates quotable from ${c.effectiveness_min_uses} uses.</p>`;
+    const rows = templatesCache.map(t => `<tr data-tpl="${esc(t.name)}" class="clickable"><td>${esc(t.name)}</td><td>${templateStatePill(t)}</td><td>v${t.version}</td><td>${esc(t.source)}</td><td>${templateEffectivenessText(t)}</td><td>${t.retirement_due ? pill('due', 'warn') : ''}</td></tr>`).join('');
+    tableBox.className = '';
+    tableBox.innerHTML = rows ? `<table><tr><th>Template</th><th>State</th><th>Version</th><th>Source</th><th>Effectiveness</th><th>Retirement</th></tr>${rows}</table>` : '<p class="note">No templates.</p>';
+    tableBox.querySelectorAll('tr.clickable').forEach(tr => tr.onclick = () => {
+      templateShownName = tr.dataset.tpl;
+      $('tpl-pick').value = templateShownName;
+      const t = templatesCache.find(x => x.name === templateShownName);
+      if (t) renderTemplateDetail(t);
+    });
+    const pick = $('tpl-pick');
+    const wanted = keepName || templateShownName;
+    pick.innerHTML = templatesCache.map(t => `<option value="${esc(t.name)}">${esc(t.name)} (${esc(t.state)})</option>`).join('');
+    const current = templatesCache.find(x => x.name === wanted) || templatesCache[0];
+    if (current) {
+      templateShownName = current.name;
+      pick.value = current.name;
+      renderTemplateDetail(current);
+    }
+  } catch (e) {
+    noteBox.className = 'empty';
+    noteBox.textContent = 'Templates unavailable.';
+    tableBox.textContent = '';
+  }
+}
+$('tpl-refresh').onclick = () => loadTemplates(templateShownName);
+$('tpl-pick').onchange = () => {
+  templateShownName = $('tpl-pick').value;
+  const t = templatesCache.find(x => x.name === templateShownName);
+  if (t) renderTemplateDetail(t);
+};
+
+async function templateAct(url, body, doneText) {
+  const status = $('tpl-status');
+  const actor = ($('tpl-actor').value || '').trim();
+  const reason = ($('tpl-reason').value || '').trim();
+  if (!actor) { status.textContent = 'governance acts name their actor'; return; }
+  status.textContent = 'working…';
+  try {
+    const res = await fetch(url, {method: 'POST', headers: headers(), body: JSON.stringify({actor, reason, ...body})});
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.detail || res.statusText);
+    status.textContent = doneText(data);
+    await loadTemplates(templateShownName);
+  } catch (e) { status.textContent = 'refused: ' + e.message; }
+}
+$('tpl-act').onclick = () => {
+  const t = templatesCache.find(x => x.name === templateShownName);
+  if (!t) return;
+  const text = $('tpl-text').value, guide = $('tpl-guide').value;
+  if (t.source === 'bundled') {
+    templateAct('/api/templates', {area: t.area, text, guide}, r => `authored — ${r.name} stands in draft at v${r.version}, by ${r.authored_by}`);
+  } else {
+    templateAct(`/api/templates/${encodeURIComponent(t.name)}/edit`, {text, guide}, r => `edited — ${r.name} is draft at v${r.version}; it serves again after a promotion`);
+  }
+};
+$('tpl-promote').onclick = () => {
+  const t = templatesCache.find(x => x.name === templateShownName);
+  if (!t) return;
+  templateAct(`/api/templates/${encodeURIComponent(t.name)}/promote`, {}, r => `promoted — ${r.name} is live at v${r.version}`);
+};
+$('tpl-retire').onclick = () => {
+  const t = templatesCache.find(x => x.name === templateShownName);
+  if (!t) return;
+  templateAct(`/api/templates/${encodeURIComponent(t.name)}/retire`, {}, r => `retired — ${r.name} drafts nothing from the next run on`);
+};
+
 // ---------------------------------------------------------------- views
 let dashboardsLoaded = false;
 function showView(name) {
@@ -1713,6 +1873,7 @@ function showView(name) {
   $('view-incidents').style.display = name === 'incidents' ? '' : 'none';
   $('view-watch').style.display = name === 'watch' ? '' : 'none';
   $('view-handoff').style.display = name === 'handoff' ? '' : 'none';
+  $('view-templates').style.display = name === 'templates' ? '' : 'none';
   $('tab-console').classList.toggle('active', name === 'console');
   $('tab-dashboards').classList.toggle('active', name === 'dashboards');
   $('tab-compare').classList.toggle('active', name === 'compare');
@@ -1721,6 +1882,7 @@ function showView(name) {
   $('tab-incidents').classList.toggle('active', name === 'incidents');
   $('tab-watch').classList.toggle('active', name === 'watch');
   $('tab-handoff').classList.toggle('active', name === 'handoff');
+  $('tab-templates').classList.toggle('active', name === 'templates');
   if (name === 'dashboards' && !dashboardsLoaded) loadDashboards();
   if (name === 'compare' && !$('cmp-json').value) $('cmp-json').value = $('json').value;
   if (name === 'threads') loadThreads();
@@ -1728,6 +1890,7 @@ function showView(name) {
   if (name === 'incidents') loadIncidents();
   if (name === 'watch') loadWatch();
   if (name === 'handoff') loadHandoffs();
+  if (name === 'templates') loadTemplates();
 }
 $('tab-console').onclick = () => showView('console');
 $('tab-dashboards').onclick = () => showView('dashboards');
@@ -1737,6 +1900,7 @@ $('tab-qa').onclick = () => showView('qa');
 $('tab-incidents').onclick = () => showView('incidents');
 $('tab-watch').onclick = () => showView('watch');
 $('tab-handoff').onclick = () => showView('handoff');
+$('tab-templates').onclick = () => showView('templates');
 $('dash-refresh').onclick = loadDashboards;
 
 // ---------------------------------------------------------------- policy

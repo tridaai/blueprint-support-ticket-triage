@@ -2136,6 +2136,378 @@ class TriageService:
                 return handoffs.handoff_view(handoff)
         return None
 
+    # -- template governance (the lifecycle acts) ----------------------------
+
+    def list_templates(self) -> dict:
+        """The template registry as the desk reads it: every
+        template's effective record (bundled defaults, governed
+        records standing in their place), its effectiveness
+        figures (round 11's rows, verbatim), and the retirement
+        watch's verdict per template — plus the authored rules
+        the verdicts were reached under."""
+        from . import template_governance
+
+        report = self.template_effectiveness()
+        rows = template_governance.registry(self.store.all_templates())
+        views = [
+            template_governance.template_view(row, report) for row in rows
+        ]
+        due = [view["name"] for view in views if view["retirement_due"]]
+        return {
+            "templates": views,
+            "constants": template_governance.governance_constants(),
+            "note": (
+                f"{len(views)} template(s) in the family; "
+                + (
+                    f"{len(due)} proposed for retirement: {', '.join(due)}"
+                    if due
+                    else "none proposed for retirement"
+                )
+                + " — a proposal changes nothing; a named editor retires"
+            ),
+        }
+
+    def get_template(self, name: str) -> dict:
+        """One template's registry view (record + effectiveness +
+        the retirement verdict). KeyError for a name the family
+        does not carry."""
+        from . import template_governance
+
+        self._template_area_or_raise(name)
+        report = self.template_effectiveness()
+        for row in template_governance.registry(self.store.all_templates()):
+            if row["name"] == name:
+                return template_governance.template_view(row, report)
+        raise KeyError(f"unknown template {name!r}")  # unreachable: registry covers the family
+
+    def _template_area_or_raise(self, name: str) -> str:
+        from . import templates
+
+        for area in templates.template_areas():
+            if templates.template_name(area) == name:
+                return area
+        raise KeyError(f"unknown template {name!r}")
+
+    def _governed_template(self, name: str):
+        for record in self.store.all_templates():
+            if record.name == name:
+                return record
+        return None
+
+    def _materialise_template(self, name: str, area: str, moment: datetime):
+        """Bring a bundled template under governance: a record
+        carrying the bundled words at the bundled version, live —
+        the state it stands in today, so the act that follows
+        (an edit, a retirement) starts from the truth."""
+        from . import templates
+        from .schemas import TemplateRecord
+
+        return TemplateRecord(
+            name=name,
+            area=area,
+            text=templates.bundled_text(),
+            guide=templates.bundled_guide(area),
+            state="live",
+            version=templates.BUNDLED_VERSION,
+            authored_by="",
+            created_at=format_timestamp(moment),
+            updated_at=format_timestamp(moment),
+            history=[],
+        )
+
+    @staticmethod
+    def _validate_template_words(text: str, guide: str) -> None:
+        """The words must be words a draft can be built from: a
+        non-empty body carrying the ``{guide}`` placeholder (the
+        guide pointer IS the template's payload — a body without
+        it points the customer nowhere), a non-empty guide, and
+        placeholders the draft builder can actually fill."""
+        from . import template_governance
+
+        if not text.strip():
+            raise template_governance.TemplateGovernanceError(
+                "template text is required — a template is its words"
+            )
+        if "{guide}" not in text:
+            raise template_governance.TemplateGovernanceError(
+                "template text must carry the {guide} placeholder — "
+                "the draft's payload is the pointer to the documented "
+                "answer for the area; without it the words send the "
+                "customer nowhere"
+            )
+        if not guide.strip():
+            raise template_governance.TemplateGovernanceError(
+                "a guide is required — where the documented answer "
+                "lives, for this template's area"
+            )
+        try:
+            text.format(name="Customer", guide=guide)
+        except (KeyError, IndexError, ValueError) as exc:
+            raise template_governance.TemplateGovernanceError(
+                f"template text cannot be filled by the draft "
+                f"builder ({exc}) — the placeholders it knows are "
+                "{name} and {guide}"
+            ) from exc
+
+    def author_template(
+        self,
+        *,
+        area: str,
+        text: str,
+        guide: str,
+        actor: str,
+        reason: str,
+        now: datetime | None = None,
+    ):
+        """Author new words for a template name
+        (template_governance.py). The record starts in DRAFT —
+        governed words are never live before a promotion approves
+        them — at version 1, with the authoring on its history.
+
+        Authoring is the FIRST governance of a name: over a name
+        that already stands governed it is a conflict (edit the
+        record, or retire it — authoring does not bury a history),
+        and over a retired name likewise (retired is terminal).
+        """
+        from . import template_governance, templates
+        from .schemas import TemplateAct, TemplateRecord
+
+        actor = (actor or "").strip()
+        if not actor:
+            raise template_governance.TemplateGovernanceError(
+                "actor is required — authoring a template names its editor"
+            )
+        reason = (reason or "").strip()
+        if not reason:
+            raise template_governance.TemplateGovernanceError(
+                "reason is required — authoring states the basis for "
+                "the new words"
+            )
+        area = (area or "").strip()
+        if area not in templates.template_areas():
+            raise template_governance.TemplateGovernanceError(
+                f"unknown product area {area!r} — the template family "
+                f"is keyed by {templates.template_areas()}; a template "
+                "for anything else could never be selected"
+            )
+        name = templates.template_name(area)
+        existing = self._governed_template(name)
+        if existing is not None:
+            raise template_governance.TemplateGovernanceConflict(
+                f"template {name} already stands governed "
+                f"(state {existing.state}, version {existing.version}) "
+                "— edit its record, or retire it; authoring writes "
+                "the first record for a name and does not bury an "
+                "existing history"
+            )
+        self._validate_template_words(text or "", guide or "")
+        moment = now or datetime.now(timezone.utc)
+        record = TemplateRecord(
+            name=name,
+            area=area,
+            text=text,
+            guide=guide,
+            state="draft",
+            version=1,
+            authored_by=actor,
+            created_at=format_timestamp(moment),
+            updated_at=format_timestamp(moment),
+            history=[
+                TemplateAct(
+                    action="authored",
+                    actor=actor,
+                    at=format_timestamp(moment),
+                    reason=reason,
+                    version=1,
+                )
+            ],
+        )
+        self.store.save_template(record)
+        return record
+
+    def edit_template(
+        self,
+        name: str,
+        *,
+        actor: str,
+        text: str | None = None,
+        guide: str | None = None,
+        reason: str = "",
+        now: datetime | None = None,
+    ):
+        """Edit a template's words (template_governance.py).
+
+        The version bumps, the editor becomes the version's
+        author, and a LIVE template returns to DRAFT — the words
+        an agent sends never change silently underneath the
+        approval that let them serve; the edited words serve
+        again only after a promotion. Editing a bundled template
+        brings it under governance with this act. A retired
+        template's words are history and are not edited; an edit
+        that changes nothing is refused, so versions never move
+        without the words moving.
+        """
+        from . import template_governance
+        from .schemas import TemplateAct
+
+        actor = (actor or "").strip()
+        if not actor:
+            raise template_governance.TemplateGovernanceError(
+                "actor is required — editing a template names its editor"
+            )
+        area = self._template_area_or_raise(name)
+        moment = now or datetime.now(timezone.utc)
+        record = self._governed_template(name)
+        if record is None:
+            record = self._materialise_template(name, area, moment)
+        if record.state == "retired":
+            raise template_governance.TemplateGovernanceConflict(
+                f"template {name} is retired — its words are history "
+                "and are not edited"
+            )
+        new_text = record.text if text is None else text
+        new_guide = record.guide if guide is None else guide
+        if new_text == record.text and new_guide == record.guide:
+            raise template_governance.TemplateGovernanceError(
+                f"the edit changes nothing in template {name} — a "
+                "version moves only when the words move"
+            )
+        self._validate_template_words(new_text, new_guide)
+        record.text = new_text
+        record.guide = new_guide
+        record.version += 1
+        record.authored_by = actor
+        record.state = "draft"
+        record.updated_at = format_timestamp(moment)
+        record.history.append(
+            TemplateAct(
+                action="edited",
+                actor=actor,
+                at=format_timestamp(moment),
+                reason=(reason or "").strip(),
+                version=record.version,
+            )
+        )
+        self.store.save_template(record)
+        return record
+
+    def promote_template(
+        self,
+        name: str,
+        *,
+        actor: str,
+        reason: str,
+        now: datetime | None = None,
+    ):
+        """Promote a draft template to LIVE
+        (template_governance.py): the approval that lets its
+        words serve. The approver names themselves and their
+        basis, and must not be the author of the version being
+        promoted — self-promotion is refused by name, the shift
+        handoff's handshake rule: the person who wrote the words
+        is not the person who vouches for them.
+        """
+        from . import template_governance
+        from .schemas import TemplateAct
+
+        actor = (actor or "").strip()
+        if not actor:
+            raise template_governance.TemplateGovernanceError(
+                "actor is required — promoting a template names its approver"
+            )
+        reason = (reason or "").strip()
+        if not reason:
+            raise template_governance.TemplateGovernanceError(
+                "reason is required — a promotion cites its basis: "
+                "what was read, what was checked"
+            )
+        area = self._template_area_or_raise(name)
+        record = self._governed_template(name)
+        if record is None or record.state == "live":
+            raise template_governance.TemplateGovernanceConflict(
+                f"template {name} is already live — promotion is "
+                "the draft-to-live step, and there is no draft to "
+                "promote"
+            )
+        if record.state == "retired":
+            raise template_governance.TemplateGovernanceConflict(
+                f"template {name} is retired — retirement is "
+                "terminal, and a retired template is not promoted "
+                "back to the shelf"
+            )
+        if actor == record.authored_by:
+            raise template_governance.TemplateGovernanceError(
+                f"{actor} authored version {record.version} of "
+                f"template {name} — a promotion is a second pair of "
+                "eyes, never the author's own (self-promotion)"
+            )
+        moment = now or datetime.now(timezone.utc)
+        record.state = "live"
+        record.updated_at = format_timestamp(moment)
+        record.history.append(
+            TemplateAct(
+                action="promoted",
+                actor=actor,
+                at=format_timestamp(moment),
+                reason=reason,
+                version=record.version,
+            )
+        )
+        self.store.save_template(record)
+        return record
+
+    def retire_template(
+        self,
+        name: str,
+        *,
+        actor: str,
+        reason: str,
+        now: datetime | None = None,
+    ):
+        """Retire a template (template_governance.py): a named
+        editor, a stated reason, and the template drafts nothing
+        from the next run on. Retiring a bundled template brings
+        it under governance with this act. The record stays —
+        retired is a state with a history, not a deletion.
+        """
+        from . import template_governance
+        from .schemas import TemplateAct
+
+        actor = (actor or "").strip()
+        if not actor:
+            raise template_governance.TemplateGovernanceError(
+                "actor is required — retiring a template names who took it off the shelf"
+            )
+        reason = (reason or "").strip()
+        if not reason:
+            raise template_governance.TemplateGovernanceError(
+                "reason is required — a retirement states why the "
+                "template loses the job"
+            )
+        area = self._template_area_or_raise(name)
+        moment = now or datetime.now(timezone.utc)
+        record = self._governed_template(name)
+        if record is None:
+            record = self._materialise_template(name, area, moment)
+        if record.state == "retired":
+            raise template_governance.TemplateGovernanceConflict(
+                f"template {name} is already retired — retirement "
+                "is terminal and stands once"
+            )
+        record.state = "retired"
+        record.updated_at = format_timestamp(moment)
+        record.history.append(
+            TemplateAct(
+                action="retired",
+                actor=actor,
+                at=format_timestamp(moment),
+                reason=reason,
+                version=record.version,
+            )
+        )
+        self.store.save_template(record)
+        return record
+
     # -- policy replay + audit export (reads over the records) --------------
 
     def policy_replay(

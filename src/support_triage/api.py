@@ -1710,3 +1710,137 @@ def accept_handoff(handoff_id: str, body: HandoffAcceptRequest, request: Request
     except (KeyError, ValueError) as exc:
         _handoff_http(exc)
     return handoff.model_dump()
+
+
+# ---------------------------------------------------------------------------
+# template governance (the lifecycle acts; the registry read)
+# ---------------------------------------------------------------------------
+
+
+class TemplateAuthorRequest(BaseModel):
+    area: str = ""  # the product area the template is keyed by
+    text: str = ""  # the draft body ({name} / {guide} placeholders)
+    guide: str = ""  # where the documented answer lives, for the area
+    actor: str = ""  # the named editor authoring the words
+    reason: str = ""  # the stated basis for the new words
+
+
+class TemplateEditRequest(BaseModel):
+    actor: str = ""  # the named editor changing the words
+    text: str | None = None  # new body; omitted keeps the current one
+    guide: str | None = None  # new guide; omitted keeps the current one
+    reason: str = ""
+
+
+class TemplatePromoteRequest(BaseModel):
+    actor: str = ""  # the named approver — never the version's author
+    reason: str = ""  # the stated basis for letting the words serve
+
+
+class TemplateRetireRequest(BaseModel):
+    actor: str = ""  # the named editor taking the template off the shelf
+    reason: str = ""  # why the template loses the job
+
+
+def _template_http(exc: Exception):
+    """Map a governance refusal onto its status: KeyError → 404,
+    TemplateGovernanceError → its own (409 conflict / 422 invalid)."""
+    from .template_governance import TemplateGovernanceError
+
+    if isinstance(exc, KeyError):
+        raise HTTPException(status_code=404, detail=exc.args[0] if exc.args else str(exc))
+    if isinstance(exc, TemplateGovernanceError):
+        raise HTTPException(status_code=exc.http_status, detail=str(exc))
+    raise exc
+
+
+@app.get("/api/templates")
+def list_templates():
+    """The effective template registry: every template's record
+    (bundled defaults, governed records in their place), its
+    effectiveness figures, and the retirement watch's verdict —
+    under the authored constants the verdicts were reached with."""
+    return get_service().list_templates()
+
+
+@app.get("/api/templates/{name}")
+def get_template(name: str):
+    """One template's registry view. 404 for a name the family
+    does not carry."""
+    try:
+        return get_service().get_template(name)
+    except KeyError:
+        raise HTTPException(
+            status_code=404, detail=f"unknown template {name!r}"
+        )
+
+
+@app.post("/api/templates", status_code=201)
+def author_template(body: TemplateAuthorRequest, request: Request):
+    """Author new words for a template name: a named editor, a
+    stated basis, and the record starts in DRAFT — governed words
+    serve only after a promotion. Over a name that already stands
+    governed (or retired) this is a 409; the record there is
+    edited or retired, never buried."""
+    require_api_key(request)
+    try:
+        record = get_service().author_template(
+            area=body.area,
+            text=body.text,
+            guide=body.guide,
+            actor=body.actor,
+            reason=body.reason,
+        )
+    except ValueError as exc:
+        _template_http(exc)
+    return record.model_dump()
+
+
+@app.post("/api/templates/{name}/edit")
+def edit_template(name: str, body: TemplateEditRequest, request: Request):
+    """Edit a template's words. The version bumps and a live
+    template returns to DRAFT — the words serve again only after
+    a promotion. A retired template's words are history (409);
+    an edit that changes nothing is refused."""
+    require_api_key(request)
+    try:
+        record = get_service().edit_template(
+            name,
+            actor=body.actor,
+            text=body.text,
+            guide=body.guide,
+            reason=body.reason,
+        )
+    except (KeyError, ValueError) as exc:
+        _template_http(exc)
+    return record.model_dump()
+
+
+@app.post("/api/templates/{name}/promote")
+def promote_template(name: str, body: TemplatePromoteRequest, request: Request):
+    """Promote a draft template to live: a named approver who is
+    not the version's author, citing the basis. Self-promotion is
+    refused by name; a template that is not in draft is a 409."""
+    require_api_key(request)
+    try:
+        record = get_service().promote_template(
+            name, actor=body.actor, reason=body.reason
+        )
+    except (KeyError, ValueError) as exc:
+        _template_http(exc)
+    return record.model_dump()
+
+
+@app.post("/api/templates/{name}/retire")
+def retire_template(name: str, body: TemplateRetireRequest, request: Request):
+    """Retire a template: a named editor, a stated reason, and
+    the template drafts nothing from the next run on. Already
+    retired is a 409 — retirement stands once."""
+    require_api_key(request)
+    try:
+        record = get_service().retire_template(
+            name, actor=body.actor, reason=body.reason
+        )
+    except (KeyError, ValueError) as exc:
+        _template_http(exc)
+    return record.model_dump()
