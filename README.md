@@ -18,9 +18,8 @@ Code — never the model — composes the distributions into a priority
 score, a queue, and a set of guardrail verdicts. The record waits for
 a named agent. **Nothing is ever sent to a customer by this system.**
 
-> Reference prototype. All tickets, customers, and metrics are
-> synthetic. The TypeSafe (Jev) adapter targets an early-access API —
-> see *Honest status* below.
+> Reference prototype. The TypeSafe (Jev) adapter targets an
+> early-access API — see *Honest status* below.
 
 <p align="center">
   <a href="https://trida.ai/blog/support-ticket-triage-agent-blueprint">
