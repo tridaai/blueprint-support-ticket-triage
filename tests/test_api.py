@@ -77,6 +77,32 @@ def test_invalid_decision_value_is_422(client):
     assert response.status_code == 422
 
 
+@pytest.mark.parametrize("ticket_id", ["", "   ", "TKT/1", "TKT\n1"])
+def test_unaddressable_ticket_id_is_refused_at_intake(client, ticket_id):
+    # A blank id, or one with "/", would be queued but never reachable
+    # on /tickets/{id} again — no agent could open or decide it.
+    payload = make_ticket(ticket_id="API-ID").model_dump() | {"ticket_id": ticket_id}
+    response = client.post("/tickets/analyze", json=payload)
+    assert response.status_code == 422
+    assert client.get("/queue").json()["tickets"] == []
+
+
+def test_ticket_id_is_trimmed_at_intake(client):
+    payload = make_ticket(ticket_id="API-ID").model_dump() | {"ticket_id": "  API-PAD  "}
+    assert client.post("/tickets/analyze", json=payload).status_code == 201
+    assert client.get("/tickets/API-PAD").status_code == 200
+
+
+def test_ticket_with_no_text_is_refused_at_intake(client):
+    payload = make_ticket(ticket_id="API-EMPTY").model_dump() | {"subject": "  ", "body": ""}
+    response = client.post("/tickets/analyze", json=payload)
+    assert response.status_code == 422
+    assert "subject or a body" in response.text
+    # Either one alone is enough to triage.
+    only_body = make_ticket(ticket_id="API-BODY", subject="").model_dump()
+    assert client.post("/tickets/analyze", json=only_body).status_code == 201
+
+
 def test_second_decision_conflicts(client):
     client.post("/tickets/analyze", json=make_ticket(ticket_id="API-3").model_dump())
     client.post("/tickets/API-3/decision", json={"decision": "approved"})

@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from typing import Any, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 class TicketInput(BaseModel):
@@ -26,6 +26,29 @@ class TicketInput(BaseModel):
     account_tier: str = ""  # free | pro | enterprise — context, never a decision input to hide behind
     received_at: str = ""  # ISO datetime
     previous_ticket_ids: list[str] = Field(default_factory=list)
+
+    @field_validator("ticket_id")
+    @classmethod
+    def _addressable_id(cls, value: str) -> str:
+        # The id is the run's address on every route (/tickets/{id},
+        # /api/runs/{id}/…). A blank id, or one carrying "/", would be
+        # stored and queued but never reachable again — a run no agent
+        # could open or decide. Refused at intake instead.
+        value = value.strip()
+        if not value:
+            raise ValueError("ticket_id must not be blank")
+        if "/" in value or any(ord(ch) < 32 for ch in value):
+            raise ValueError("ticket_id must not contain '/' or control characters")
+        return value
+
+    @model_validator(mode="after")
+    def _has_text(self) -> "TicketInput":
+        # A ticket with neither subject nor body gives the decision
+        # call nothing to judge; triaging it would record a confident
+        # answer about no evidence.
+        if not self.subject.strip() and not self.body.strip():
+            raise ValueError("a ticket needs a subject or a body")
+        return self
 
 
 class QuestionAnswer(BaseModel):
