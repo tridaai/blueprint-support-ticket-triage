@@ -83,15 +83,59 @@ def fake_complete_factory(payload=None, fail_first_with: str | None = None):
     return complete
 
 
+def jev_answers(answers: dict | None = None) -> dict:
+    """Port-shape answers (``valid_answers``) as Jev's typed answers.
+
+    Choice probabilities carry over; a score's mass on values Jev was
+    not asked folds down onto the asked level below it (by position);
+    a verify becomes ``noul`` = P(true)."""
+    from support_triage.backends import _score_values
+
+    answers = answers if answers is not None else valid_answers()
+    by_key = {q.key: q for q in triage_questions()}
+    out: dict = {}
+    for key, answer in answers.items():
+        question = by_key[key]
+        dist = answer["probabilities"]
+        if isinstance(question, ChoiceQuestion):
+            top = max(dist, key=dist.get)
+            out[key] = {
+                "type": "choice",
+                "choice": top,
+                "confidence": dist[top],
+                "probabilities": dict(dist),
+            }
+        elif isinstance(question, ScoreQuestion):
+            values = _score_values(question)
+            levels = {str(i): 0.0 for i in range(len(values))}
+            for value, p in dist.items():
+                position = max(i for i, v in enumerate(values) if v <= int(value))
+                levels[str(position)] += p
+            out[key] = {
+                "type": "score",
+                "score": sum(int(i) * p for i, p in levels.items()),
+                "confidence": max(levels.values()),
+                "legend": {str(i): str(v) for i, v in enumerate(values)},
+                "probabilities": levels,
+            }
+        else:
+            p_true = dist["probability"] if "probability" in dist else dist["true"]
+            out[key] = {"type": "noul", "noul": p_true}
+    return out
+
+
 def fake_jev_transport(status: int = 200, payload: dict | None = None):
-    """An injectable Jev transport recording the request it received."""
+    """An injectable Jev transport recording the request it received.
+
+    The default payload is Jev's ``/v1/systemone`` response shape."""
     calls: list[dict] = []
 
     def transport(method, url, headers, body, timeout):
         calls.append({"method": method, "url": url, "headers": headers, "body": body})
         return status, payload if payload is not None else {
-            "answers": valid_answers(),
             "model": "jev-test",
+            "answers": jev_answers(),
+            "usage": {"input_tokens": 1200, "output_tokens": 300},
         }
 
     transport.calls = calls

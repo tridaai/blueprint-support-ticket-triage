@@ -81,6 +81,7 @@ def no_dotenv(monkeypatch):
 
     monkeypatch.setattr(config, "load_dotenv", lambda path=None: None)
     # Modules that imported the symbol directly get the same treatment.
+    import support_triage.api as api
     import support_triage.backends as backends
     import support_triage.checkpoints as checkpoints
     import support_triage.embeddings as embeddings
@@ -88,6 +89,6 @@ def no_dotenv(monkeypatch):
     import support_triage.store as store
     import support_triage.wiring as wiring  # noqa: F401
 
-    for module in (backends, checkpoints, embeddings, objectstore, store):
+    for module in (api, backends, checkpoints, embeddings, objectstore, store):
         if hasattr(module, "load_dotenv"):
             monkeypatch.setattr(module, "load_dotenv", lambda path=None: None)

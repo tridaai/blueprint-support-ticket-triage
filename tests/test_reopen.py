@@ -193,15 +193,16 @@ def test_llm_backend_gets_the_prior_run_as_fenced_history():
 
 def test_jev_backend_gets_the_context_as_its_own_field(monkeypatch):
     monkeypatch.setenv("TYPESAFE_API_KEY", "ts-test-not-real")
-    transport = fake_jev_transport(payload={"answers": valid_answers()})
+    transport = fake_jev_transport()
     service = fresh_service(JevDecisionEngine(transport=transport))
     service.run_ticket(make_ticket(ticket_id="R-6"))
     run = service.reopen_run("R-6", message="Following up — still not fixed.", actor="a")
 
-    assert "context" not in transport.calls[0]["body"]
-    body = transport.calls[-1]["body"]
-    assert body["context"].startswith("<<<PRIOR HANDLING HISTORY")
-    assert "category=billing (confidence" in body["context"]
+    assert isinstance(transport.calls[0]["body"]["state"], str)
+    state = transport.calls[-1]["body"]["state"]
+    assert "still not fixed" in state["ticket"]
+    assert state["prior_history"].startswith("<<<PRIOR HANDLING HISTORY")
+    assert "category=billing (confidence" in state["prior_history"]
     assert run.result.reopen.context_use == "history_block"
 
 

@@ -18,9 +18,10 @@ a validated DecisionSet of probability distributions out*:
   provider error. This is the runnable-today profile.
 - :class:`JevDecisionEngine` (``DECISION_BACKEND=jev``) — the
   TypeSafe AI adapter: a System One model call (state + typed
-  questions → structured answers with calibrated probabilities). Jev
-  is in early access; the adapter is written to the documented
-  primitives shape and fails loudly when the key is missing or the
+  questions → structured answers with calibrated probabilities), over
+  ``POST /v1/systemone``. The adapter translates the port's questions
+  into Jev's ``choice`` / ``score`` / ``noul`` primitives and its
+  answers back, and fails loudly when the key is missing or the
   endpoint refuses — it never substitutes another backend.
 
 No backend ever degrades into a different backend silently. A triage
@@ -29,7 +30,8 @@ record always names the engine that produced it.
 Reopen context (the port's ``context`` argument — a prior run's
 record, offered on reopen runs) is handled per backend, openly: the
 LLM adapter adds it to the prompt as a fenced history block, the Jev
-adapter sends it as a separate fenced ``context`` field, and the
+adapter sends it as a separate fenced ``prior_history`` field of a
+structured ``state`` (beside the ticket, never inside it), and the
 offline heuristics ignore it by design. The run record states which
 happened (``ReopenInfo.context_use``).
 """
@@ -646,13 +648,122 @@ def _urllib_transport(method: str, url: str, headers: dict, body: dict, timeout:
         return exc.code, payload
 
 
+# Jev's score primitive takes at most this many levels; a wider rubric
+# (the port's 0–10 is eleven) is asked on an evenly stepped subset.
+_JEV_MAX_SCORE_LEVELS = 10
+
+_RUBRIC_ANCHOR = re.compile(r"(\d+)\s*=\s*([^;]+?)(?=;\s*\d+\s*=|\.?\s*$)")
+
+
+def _score_values(question: ScoreQuestion) -> list[int]:
+    """The rubric values asked of Jev, in position order.
+
+    Every integer when the rubric fits; otherwise the smallest even
+    step that fits and still lands on both ends (0–10 → 0, 2, … 10).
+    The values not asked get probability 0 on the way back."""
+    span = question.maximum - question.minimum
+    step = 1
+    while span // step + 1 > _JEV_MAX_SCORE_LEVELS or span % step:
+        step += 1
+    return list(range(question.minimum, question.maximum + 1, step))
+
+
+def _score_levels(question: ScoreQuestion) -> list[str]:
+    """One label per asked level, in order — Jev scores by position.
+
+    The rubric's ``N = …`` anchors label their own levels; the levels
+    between anchors are named as such, so every position carries the
+    same meaning as the integer the port validates."""
+    anchors = {int(n): text.strip() for n, text in _RUBRIC_ANCHOR.findall(question.rubric)}
+    levels = []
+    for value in _score_values(question):
+        if value in anchors:
+            levels.append(f"{value}: {anchors[value]}")
+        else:
+            below = max((a for a in anchors if a < value), default=None)
+            above = min((a for a in anchors if a > value), default=None)
+            if below is not None and above is not None:
+                levels.append(f"{value}: between level {below} and level {above}")
+            else:
+                levels.append(f"{value} on the {question.minimum}–{question.maximum} scale")
+    return levels
+
+
+def _jev_question(question: Question) -> dict:
+    """The port's question as one of Jev's primitives."""
+    if isinstance(question, ChoiceQuestion):
+        return {
+            "type": "choice",
+            "instructions": question.prompt,
+            "criteria": {option: None for option in question.options},
+        }
+    if isinstance(question, ScoreQuestion):
+        return {
+            "type": "score",
+            "instructions": f"{question.prompt} {question.rubric}".strip(),
+            "criteria": _score_levels(question),
+        }
+    return {
+        "type": "noul",
+        "instructions": question.prompt,
+        "criteria": {
+            "true": question.statement or question.prompt,
+            "false": "That is not the case for this ticket.",
+        },
+    }
+
+
+_JEV_TYPE = {"choice": "choice", "score": "score", "verify": "noul"}
+
+
+def _from_jev_answers(questions: list[Question], answers: dict) -> dict:
+    """Jev's typed answers → the port's raw ``{"probabilities": …}`` shape.
+
+    Only the shape is translated; validation stays with
+    :func:`build_decision_set`. An answer whose type does not match its
+    question is an error, not something to reinterpret."""
+    raw: dict = {}
+    for key, answer in answers.items():
+        question = next((q for q in questions if q.key == key), None)
+        if question is None or not isinstance(answer, dict):
+            raw[key] = answer  # unknown keys / non-objects: let validation name them
+            continue
+        expected = _JEV_TYPE[question.kind]
+        if answer.get("type") != expected:
+            raise DecisionValidationError(
+                f"{key}: answer type {answer.get('type')!r} does not match question type {expected!r}"
+            )
+        if expected == "noul":
+            raw[key] = {"probabilities": {"probability": answer.get("noul")}}
+        elif expected == "score":
+            dist = answer.get("probabilities")
+            if not isinstance(dist, dict):
+                raise DecisionValidationError(f"{key}: score answer carries no probabilities object")
+            values = _score_values(question)
+            full = {str(v): 0.0 for v in range(question.minimum, question.maximum + 1)}
+            for level, p in dist.items():
+                try:
+                    position = int(level)
+                except (TypeError, ValueError):
+                    raise DecisionValidationError(f"{key}: score level {level!r} is not a position")
+                if not 0 <= position < len(values):
+                    raise DecisionValidationError(f"{key}: score level {level!r} is out of range")
+                full[str(values[position])] = p
+            raw[key] = {"probabilities": full}
+        else:
+            raw[key] = {"probabilities": answer.get("probabilities")}
+    return raw
+
+
 class JevDecisionEngine:
     """TypeSafe AI (Jev) — a System One model behind the same port.
 
-    The request is the documented primitives shape: one ``state``
-    string plus the typed question list; the response carries one
-    structured answer per question, probabilities included. Jev is in
-    early access — when the key is absent the engine refuses to
+    The request is ``POST /v1/systemone``: a ``state`` plus the
+    questions keyed by name, each as a Jev primitive (choice → choice,
+    score → score over one label per asked rubric level, verify → noul); the
+    response carries one typed answer per name, probabilities
+    included, translated back to the port's shape and validated there.
+    When the key is absent the engine refuses to
     construct (a configuration error, loudly), and when the endpoint
     refuses or answers malformed, the run fails with a translated
     provider error. There is no silent fallback: a record produced by
@@ -674,7 +785,7 @@ class JevDecisionEngine:
                 "Jev is in early access — the key must be an issued TypeSafe access key.",
             )
         self._base_url = env_str("TYPESAFE_BASE_URL", "https://api.typesafe.ai").rstrip("/")
-        self.model = env_str("TYPESAFE_MODEL", "jev")
+        self.model = env_str("TYPESAFE_MODEL", "jev-latest")
         self._timeout = env_float("DECISION_TIMEOUT_SECONDS", 30.0)
         self._transport = transport or _urllib_transport
 
@@ -683,25 +794,29 @@ class JevDecisionEngine:
         body = {
             "model": self.model,
             "state": state,
-            "questions": [_question_spec(q) for q in questions],
+            "questions": {q.key: _jev_question(q) for q in questions},
         }
         if context:
-            # A reopen's prior-run history: its own field in the
-            # request, fenced as historical record — never folded
-            # into the state string, where it would read as part of
-            # the new ticket.
-            body["context"] = fence_history(context)
+            # A reopen's prior-run history: its own field of a
+            # structured state, fenced as historical record — never
+            # folded into the ticket string, where it would read as
+            # part of the new ticket.
+            body["state"] = {"ticket": state, "prior_history": fence_history(context)}
         headers = {"Authorization": f"Bearer {self._api_key}"}
         try:
             status, payload = self._transport(
-                "POST", f"{self._base_url}/v1/decisions", headers, body, self._timeout
+                "POST", f"{self._base_url}/v1/systemone", headers, body, self._timeout
             )
         except Exception as exc:
             raise translate_provider_error(exc, backend="jev", base_url=self._base_url) from exc
         if status != 200:
             detail = ""
             if isinstance(payload, dict):
-                detail = str(payload.get("error") or payload.get("detail") or "")[:200]
+                error = payload.get("error") or payload.get("detail") or ""
+                if isinstance(error, dict):
+                    # TypeSafe's error body: {"error_type": …, "message": …}
+                    error = error.get("message") or error.get("error_type") or error
+                detail = str(error)[:200]
             raise ProviderError(
                 f"jev decision call failed (HTTP {status})"
                 + (f": {detail}" if detail else "")
@@ -718,7 +833,7 @@ class JevDecisionEngine:
         try:
             return build_decision_set(
                 questions,
-                answers,
+                _from_jev_answers(questions, answers),
                 backend="jev",
                 model=str(payload.get("model") or self.model),
                 latency_ms=round((time.perf_counter() - started) * 1000, 2),

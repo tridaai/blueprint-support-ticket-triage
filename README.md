@@ -112,7 +112,7 @@ Or natively, offline, in about a minute:
 ```bash
 uv sync --extra dev        # or, without uv: make install-pip
 make demo                  # one ticket, traced end to end
-make test                  # 403 tests
+make test                  # 406 tests
 make evals                 # golden routing 71/71 · calibration gates pass
 make serve                 # API + console on :8000
 ```
@@ -360,7 +360,8 @@ that loop, both enforced in code:
     through the port. The LLM adapter adds it to the prompt as a
     fenced *prior handling history* block — historical record,
     outside the untrusted-ticket fence; the Jev adapter sends it
-    as the request's own `context` field; the offline backend
+    as its own `prior_history` field of a structured `state`, beside
+    the ticket and never inside it; the offline backend
     ignores it deterministically, and the record says so
     (`context_use` is `history_block` or `ignored_offline` — no
     silent differences). The injection screen runs on the new
@@ -590,7 +591,7 @@ in code from the stored records:
   customer's *prior* records (counts, categories, flags, the last
   outcome) and offers it through the decision port's `context`
   argument, under the reopen idiom: fenced history for the
-  LLM/Jev adapters, a `context` field for Jev, accepted and
+  LLM/Jev adapters, a `prior_history` field of the state for Jev, accepted and
   deliberately unused by the offline heuristics — and what
   happened is recorded on the run (`history.context_use`). No
   other ticket's subject or body ever enters the block: history
@@ -984,12 +985,16 @@ list is unchanged (0001–0003).
 
 ## Honest status
 
-- **Jev is early access.** The adapter is written to TypeSafe's
-  documented primitives shape (state + typed questions → structured
-  answers with probabilities) and is unit-tested against that shape;
-  live verification is pending an issued access key. Until then the
-  adapter fails with a clear "not configured / unavailable" error —
-  it never degrades into another backend and pretends.
+- **Jev is early access.** The adapter calls TypeSafe's published
+  `POST /v1/systemone` (model `jev-latest` by default) and is
+  verified live with an issued key as well as unit-tested against
+  that shape. Choice questions map to Jev's `choice`, verify
+  questions to `noul` (P(true)), and score questions to `score` —
+  Jev takes at most 10 levels, so the 0–10 rubrics are asked on
+  0, 2, … 10 and the unasked odd values carry probability 0. Without
+  a key, or when the endpoint refuses, the adapter fails with a clear
+  "not configured / unavailable" error — it never degrades into
+  another backend and pretends.
 - **The LLM adapter is the runnable-today profile** — any provider
   key (or a local Ollama) runs the full pipeline against a real
   model, with the same validation and guardrails.

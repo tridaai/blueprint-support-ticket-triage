@@ -405,13 +405,13 @@ def test_llm_prompt_carries_the_block_fenced_and_text_free():
     assert run.result.history.context_use == "history_block"
 
 
-def test_jev_request_carries_the_block_as_its_context_field(monkeypatch):
+def test_jev_request_carries_the_block_as_its_prior_history_field(monkeypatch):
     monkeypatch.setenv("TYPESAFE_API_KEY", "ts-test-not-real")
-    transport = fake_jev_transport(payload={"answers": valid_answers()})
+    transport = fake_jev_transport()
     service = fresh_service(JevDecisionEngine(transport=transport))
     _priya_history(service)
     first = transport.calls[0]["body"]
-    assert "context" not in first  # DOS-1 was a first contact
+    assert isinstance(first["state"], str)  # DOS-1 was a first contact
     run = service.run_ticket(
         make_ticket(
             ticket_id="DOS-JEV",
@@ -419,11 +419,12 @@ def test_jev_request_carries_the_block_as_its_context_field(monkeypatch):
             received_at="2026-09-20T10:00:00Z",
         )
     )
-    body = transport.calls[-1]["body"]
-    assert body["context"].startswith("<<<PRIOR HANDLING HISTORY")
-    assert "Customer history for priya@example.com" in body["context"]
-    assert "seat charge for a colleague" not in body["context"]
-    assert "Customer history" not in body["state"]  # never folded into the state
+    state = transport.calls[-1]["body"]["state"]
+    assert "A new billing question" in state["ticket"]
+    assert state["prior_history"].startswith("<<<PRIOR HANDLING HISTORY")
+    assert "Customer history for priya@example.com" in state["prior_history"]
+    assert "seat charge for a colleague" not in state["prior_history"]
+    assert "Customer history" not in state["ticket"]  # never folded into the ticket
     assert run.result.history.context_use == "history_block"
 
 

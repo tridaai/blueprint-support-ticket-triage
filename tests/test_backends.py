@@ -16,7 +16,7 @@ from support_triage.backends import (
 from support_triage.errors import ProviderError
 from support_triage.questions import triage_questions
 
-from helpers import fake_complete_factory, fake_jev_transport, valid_answers
+from helpers import fake_complete_factory, fake_jev_transport, jev_answers, valid_answers
 
 STATE = "Subject: Charged twice\nChannel: email\nBody text about a double charge and a refund."
 
@@ -141,13 +141,50 @@ def test_jev_sends_the_primitives_shape_and_validates(monkeypatch):
     assert result.choice("category") == "billing"
     (call,) = transport.calls
     assert call["method"] == "POST"
-    assert call["url"] == "https://api.typesafe.ai/v1/decisions"
+    assert call["url"] == "https://api.typesafe.ai/v1/systemone"
     assert call["headers"]["Authorization"] == "Bearer ts-test-not-real"
+    assert call["body"]["model"] == "jev-latest"
     assert call["body"]["state"] == STATE
-    keys = [q["key"] for q in call["body"]["questions"]]
-    assert keys[0] == "category" and len(keys) == 11
-    spec = next(q for q in call["body"]["questions"] if q["key"] == "category")
-    assert spec["type"] == "choice" and "billing" in spec["options"]
+    questions = call["body"]["questions"]
+    assert list(questions)[0] == "category" and len(questions) == 11
+    assert questions["category"]["type"] == "choice"
+    assert "billing" in questions["category"]["criteria"]
+    assert questions["contains_pii"]["type"] == "noul"
+    urgency = questions["urgency"]
+    assert urgency["type"] == "score"
+    # Jev takes at most 10 levels: the 0–10 rubric is asked as 0, 2, … 10.
+    assert len(urgency["criteria"]) == 6
+    assert urgency["criteria"][0].startswith("0: no time pressure")
+    assert urgency["criteria"][-1].startswith("10: the customer is fully down")
+    assert result.usage == {"input_tokens": 1200, "output_tokens": 300}
+
+
+def test_jev_score_answer_maps_positions_back_onto_the_rubric(monkeypatch):
+    monkeypatch.setenv("TYPESAFE_API_KEY", "ts-test-not-real")
+    answers = jev_answers()
+    answers["urgency"]["probabilities"] = {"0": 0.0, "1": 0.0, "2": 0.0, "3": 0.0, "4": 1.0, "5": 0.0}
+    engine = JevDecisionEngine(transport=fake_jev_transport(payload={"answers": answers}))
+    result = engine.decide(STATE, triage_questions())
+    assert result.score("urgency") == pytest.approx(8.0)
+    assert result.get("urgency").probabilities["7"] == 0.0
+
+
+def test_jev_noul_answer_is_the_probability_of_true(monkeypatch):
+    monkeypatch.setenv("TYPESAFE_API_KEY", "ts-test-not-real")
+    answers = jev_answers()
+    answers["is_outage_report"] = {"type": "noul", "noul": 0.93}
+    engine = JevDecisionEngine(transport=fake_jev_transport(payload={"answers": answers}))
+    result = engine.decide(STATE, triage_questions())
+    assert result.probability("is_outage_report") == pytest.approx(0.93)
+
+
+def test_jev_answer_of_the_wrong_type_is_rejected(monkeypatch):
+    monkeypatch.setenv("TYPESAFE_API_KEY", "ts-test-not-real")
+    answers = jev_answers()
+    answers["contains_pii"] = {"type": "choice", "choice": "yes", "confidence": 1.0, "probabilities": {"yes": 1.0}}
+    engine = JevDecisionEngine(transport=fake_jev_transport(payload={"answers": answers}))
+    with pytest.raises(ProviderError, match="does not match question type 'noul'"):
+        engine.decide(STATE, triage_questions())
 
 
 def test_jev_http_error_is_a_clear_provider_error_never_a_fallback(monkeypatch):
@@ -158,9 +195,24 @@ def test_jev_http_error_is_a_clear_provider_error_never_a_fallback(monkeypatch):
         engine.decide(STATE, triage_questions())
 
 
+def test_jev_error_body_message_is_surfaced_readably(monkeypatch):
+    monkeypatch.setenv("TYPESAFE_API_KEY", "ts-test-not-real")
+    transport = fake_jev_transport(
+        status=401,
+        payload={"error": {"error_type": "authentication_error", "message": "Cannot authenticate."}},
+    )
+    engine = JevDecisionEngine(transport=transport)
+    with pytest.raises(ProviderError) as excinfo:
+        engine.decide(STATE, triage_questions())
+    assert "(HTTP 401): Cannot authenticate." in str(excinfo.value)
+    assert "error_type" not in str(excinfo.value)
+
+
 def test_jev_malformed_answer_is_rejected_not_repaired(monkeypatch):
     monkeypatch.setenv("TYPESAFE_API_KEY", "ts-test-not-real")
-    transport = fake_jev_transport(payload={"answers": {"category": {"probabilities": {"billing": 0.5}}}})
+    transport = fake_jev_transport(
+        payload={"answers": {"category": {"type": "choice", "probabilities": {"billing": 0.5}}}}
+    )
     engine = JevDecisionEngine(transport=transport)
     with pytest.raises(ProviderError, match="invalid answer"):
         engine.decide(STATE, triage_questions())
@@ -180,7 +232,7 @@ def test_jev_custom_base_url(monkeypatch):
     transport = fake_jev_transport()
     engine = JevDecisionEngine(transport=transport)
     engine.decide(STATE, triage_questions())
-    assert transport.calls[0]["url"] == "https://jev.internal.example/v1/decisions"
+    assert transport.calls[0]["url"] == "https://jev.internal.example/v1/systemone"
 
 
 def test_llm_prompt_demands_strict_json_and_fences_state():
